@@ -2,6 +2,7 @@ import os
 import asyncio
 import aiohttp
 import re
+import json
 from datetime import datetime
 from base64 import b64encode
 from nacl import encoding, public
@@ -76,11 +77,10 @@ async def run_account(email, cookie_str):
     new_cookie_val = None
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            # 1. 登录校验：改用 /client/servers，用HTTP状态码判断
+            # 1. 登录校验 & Cookie 提取
             print(f"[{email}] 检查登录状态...")
-            async with session.get(f"{BASE_URL}/client/servers") as resp:
-                print(f"[{email}] servers HTTP: {resp.status}, URL: {resp.url}")
-
+            async with session.get(f"{BASE_URL}/client/dashboard") as resp:
+                print(f"[{email}] dashboard HTTP: {resp.status}, URL: {resp.url}")
                 for c_name, c_obj in resp.cookies.items():
                     if c_name == "connect.sid":
                         captured = f"connect.sid={c_obj.value}"
@@ -88,21 +88,18 @@ async def run_account(email, cookie_str):
                             new_cookie_val = captured
                             print(f"[{email}] 检测到新 Cookie")
 
-                # 401/403 才判定为失效
-                if resp.status in [401, 403]:
-                    print(f"[{email}] Cookie 已失效 (HTTP {resp.status})")
-                    return {"email": email, "success": False, "reason": f"Cookie 已失效 (HTTP {resp.status})，请重新获取", "new_cookie": None}
-
                 html = await resp.text()
-                print(f"[{email}] 页面长度: {len(html)}")
+                print(f"[{email}] 页面含 'logout': {'logout' in html}, 页面长度: {len(html)}")
+
+                if "logout" not in html:
+                    print(f"[{email}] Cookie 已失效")
+                    return {"email": email, "success": False, "reason": "Cookie 已失效，请重新获取", "new_cookie": None}
 
                 server_ids = list(set(re.findall(r'/servers/([a-f0-9]{8})', html)))
                 print(f"[{email}] 找到服务器: {server_ids}")
 
                 if not server_ids:
-                    # 尝试从页面找更多线索
-                    print(f"[{email}] 页面片段: {html[:500]}")
-                    return {"email": email, "success": False, "reason": "未找到任何服务器ID，Cookie可能已失效", "new_cookie": None}
+                    return {"email": email, "success": False, "reason": "未找到任何服务器ID", "new_cookie": None}
 
             details = []
             for sid in server_ids:
@@ -164,6 +161,7 @@ async def main():
         await tg_notify(msg)
         return
 
+    # 解析账号
     account_pairs = []
     for entry in ACCOUNTS_STR.split(","):
         entry = entry.strip()
@@ -174,7 +172,7 @@ async def main():
     print(f"解析到账号数: {len(account_pairs)}")
 
     if not account_pairs:
-        msg = "❌ Wispbyte: LOGIN_ACCOUNTS 格式错误，未解析到账号\n格式应为: email----connect.sid=xxx"
+        msg = f"❌ Wispbyte: LOGIN_ACCOUNTS 格式错误，未解析到账号\n格式应为: email----connect.sid=xxx"
         print(msg)
         await tg_notify(msg)
         return
