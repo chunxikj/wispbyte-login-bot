@@ -103,6 +103,36 @@ def build_report(results, start_time, end_time):
 
     return "\n".join(lines)
 
+def close_popups(sb, email: str):
+    """关闭页面上可能出现的弹窗，最多尝试3次"""
+    # 可能出现的关闭按钮选择器
+    close_selectors = [
+        'button:contains("Maybe later")',
+        'button:contains("maybe later")',
+        '.modal-close',
+        'button.close',
+        '[aria-label="Close"]',
+        'button:contains("×")',
+        'button:contains("✕")',
+    ]
+    closed = 0
+    for _ in range(3):
+        found = False
+        for sel in close_selectors:
+            try:
+                if sb.is_element_present(sel):
+                    sb.click(sel)
+                    print(f"[{email}] 关闭弹窗: {sel}")
+                    time.sleep(1)
+                    closed += 1
+                    found = True
+                    break
+            except:
+                pass
+        if not found:
+            break
+    print(f"[{email}] 共关闭 {closed} 个弹窗")
+
 def get_server_status(sb, email: str) -> str:
     """多方式读取 Console 页服务器状态，返回 online/offline/unknown"""
     # 方式1: #online-status-text
@@ -217,12 +247,25 @@ def login_one(email: str, password: str) -> dict:
             result["success"] = True
 
             # ── 步骤2: 直接跳转 Console 页 ──
-            print(f"[{email}] 直接跳转 Console 页: {CONSOLE_URL}")
+            print(f"[{email}] 跳转 Console 页: {CONSOLE_URL}")
             sb.open(CONSOLE_URL)
             sb.sleep(8)
             print(f"[{email}] 当前URL: {sb.get_current_url()}")
 
-            # ── 步骤3: 读取服务器状态 ──
+            # ── 步骤3: 关闭弹窗（最多两轮）──
+            print(f"[{email}] 检查并关闭弹窗...")
+            close_popups(sb, email)
+            time.sleep(2)
+            # 再关一轮，防止有多个弹窗
+            close_popups(sb, email)
+            time.sleep(1)
+
+            # 截图确认弹窗已关闭
+            shot = f"console_{email.replace('@','_')}.png"
+            sb.save_screenshot(shot)
+            tg_notify_photo_sync(shot, caption=f"📋 Console 页截图（弹窗处理后）\n账号: <code>{email}</code>")
+
+            # ── 步骤4: 读取服务器状态 ──
             status = get_server_status(sb, email)
             print(f"[{email}] Console 页状态: [{status}]")
 
@@ -231,7 +274,7 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤4: 离线则点击 Start ──
+            # ── 步骤5: 离线则点击 Start ──
             print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
             try:
                 start_btn = sb.driver.find_element("css selector", "#start-btn")
@@ -243,7 +286,7 @@ def login_one(email: str, password: str) -> dict:
                 tg_notify_photo_sync(shot, caption=f"🔍 找不到 Start 按钮\n错误: {str(e)[:100]}")
                 raise Exception(f"找不到 Start 按钮: {e}")
 
-            # ── 步骤5: 等待上线 ──
+            # ── 步骤6: 等待上线 ──
             started = wait_for_online(sb, email, max_seconds=60)
 
             if started:
