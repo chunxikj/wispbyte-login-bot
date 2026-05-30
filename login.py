@@ -103,307 +103,216 @@ def build_report(results, start_time, end_time):
 
     return "\n".join(lines)
 
-def click_turnstile_checkbox(sb) -> bool:
+def get_server_status(sb, email: str) -> str:
     """
-    通过获取 Turnstile iframe 的实际屏幕坐标，用 ActionChains 精确点击 checkbox
-    返回是否成功点击
+    尝试多种方式读取 Console 页服务器状态
+    返回: 'online' / 'offline' / 'unknown'
     """
-    import pyautogui
+    # 方式1: #online-status-text
     try:
-        # 找到 Turnstile iframe
-        iframes = sb.find_elements("iframe")
-        turnstile_iframe = None
-        for iframe in iframes:
-            src = iframe.get_attribute("src") or ""
-            if "challenges.cloudflare.com" in src or "turnstile" in src:
-                turnstile_iframe = iframe
-                break
+        el = sb.driver.find_element("css selector", "#online-status-text")
+        text = el.text.strip().lower()
+        if text:
+            print(f"[{email}] 状态来源 #online-status-text: [{text}]")
+            return text
+    except:
+        pass
 
-        if not turnstile_iframe:
-            print("  未找到 Turnstile iframe，尝试找所有 iframe...")
-            for iframe in iframes:
-                src = iframe.get_attribute("src") or ""
-                print(f"  iframe src: {src[:80]}")
-            # 没找到 CF iframe，可能用的是不同方式嵌入
-            return False
+    # 方式2: #server-uptime-panel
+    try:
+        el = sb.driver.find_element("css selector", "#server-uptime-panel")
+        text = el.text.strip().lower()
+        if text:
+            print(f"[{email}] 状态来源 #server-uptime-panel: [{text}]")
+            if "offline" in text:
+                return "offline"
+            # 有时长内容说明在线
+            if text and text != "offline":
+                return "online"
+    except:
+        pass
 
-        # 获取 iframe 在页面中的位置和大小
-        rect = sb.execute_script("""
-            var el = arguments[0];
-            var rect = el.getBoundingClientRect();
-            return {
-                x: rect.left,
-                y: rect.top,
-                width: rect.width,
-                height: rect.height
-            };
-        """, turnstile_iframe)
+    # 方式3: 检查 start-btn 是否可点击（disabled 说明在线）
+    try:
+        btn = sb.driver.find_element("css selector", "#start-btn")
+        disabled = btn.get_attribute("disabled")
+        if disabled:
+            print(f"[{email}] 状态来源 #start-btn disabled=True → online")
+            return "online"
+        else:
+            print(f"[{email}] 状态来源 #start-btn disabled=False → offline")
+            return "offline"
+    except:
+        pass
 
-        print(f"  Turnstile iframe 位置: x={rect['x']:.0f}, y={rect['y']:.0f}, w={rect['width']:.0f}, h={rect['height']:.0f}")
+    print(f"[{email}] 无法读取状态，返回 unknown")
+    return "unknown"
 
-        # checkbox 在 iframe 左侧约 20px，垂直居中
-        # checkbox 相对 iframe 的偏移大约是 (20, 高度/2)
-        checkbox_x_in_iframe = 20
-        checkbox_y_in_iframe = rect['height'] / 2
-
-        # 用 ActionChains 移动到 iframe 内的 checkbox 位置点击
-        from selenium.webdriver.common.action_chains import ActionChains
-        actions = ActionChains(sb.driver)
-        actions.move_to_element_with_offset(
-            turnstile_iframe,
-            checkbox_x_in_iframe - rect['width'] / 2,
-            checkbox_y_in_iframe - rect['height'] / 2
-        )
-        actions.click()
-        actions.perform()
-        print("  ✅ ActionChains 点击 Turnstile checkbox 完成")
-        return True
-
-    except Exception as e:
-        print(f"  ActionChains 点击失败: {e}")
-        return False
-
-def wait_for_turnstile_token(sb, max_wait: int = 15) -> bool:
-    """等待 Turnstile token 生成，返回是否成功"""
-    for i in range(max_wait):
+def wait_for_online(sb, email: str, max_seconds: int = 60) -> bool:
+    """等待服务器变为 online，最多等 max_seconds 秒"""
+    for i in range(max_seconds):
         time.sleep(1)
-        try:
-            token = sb.execute_script(
-                'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
-            )
-            if token and len(token) > 10:
-                print(f"  ✅ Turnstile token 已生成（第{i+1}秒），长度: {len(token)}")
-                return True
-        except:
-            pass
-    print(f"  ❌ 等待 {max_wait} 秒后 token 仍未生成")
-    return False
-
-def handle_turnstile(sb, email: str) -> bool:
-    """
-    多策略处理 Turnstile，返回是否通过
-    策略1: SeleniumBase 内置 uc_gui_click_captcha
-    策略2: 计算 iframe 坐标用 ActionChains 点击
-    策略3: 直接在 iframe 内找 checkbox 点击
-    """
-    # 策略1: uc_gui_click_captcha
-    print(f"[{email}] Turnstile 策略1: uc_gui_click_captcha...")
-    try:
-        sb.uc_gui_click_captcha()
-        time.sleep(3)
-        if wait_for_turnstile_token(sb, max_wait=5):
+        status = get_server_status(sb, email)
+        if status == "online":
+            print(f"[{email}] ✅ 服务器已上线（第{i+1}秒）")
             return True
-        print(f"[{email}] 策略1 token 未生成，尝试策略2...")
-    except Exception as e:
-        print(f"[{email}] 策略1 失败: {e}")
-
-    # 策略2: ActionChains 精确坐标点击
-    print(f"[{email}] Turnstile 策略2: ActionChains 坐标点击...")
-    try:
-        if click_turnstile_checkbox(sb):
-            time.sleep(3)
-            if wait_for_turnstile_token(sb, max_wait=8):
-                return True
-        print(f"[{email}] 策略2 token 未生成，尝试策略3...")
-    except Exception as e:
-        print(f"[{email}] 策略2 失败: {e}")
-
-    # 策略3: 切换到 iframe 内直接点击 checkbox
-    print(f"[{email}] Turnstile 策略3: 切换 iframe 内点击...")
-    try:
-        iframes = sb.find_elements("iframe")
-        for iframe in iframes:
-            src = iframe.get_attribute("src") or ""
-            if "challenges.cloudflare.com" in src or "turnstile" in src:
-                sb.driver.switch_to.frame(iframe)
-                try:
-                    cb = sb.driver.find_element("css selector", 'input[type="checkbox"]')
-                    cb.click()
-                    print(f"[{email}]   iframe 内 checkbox 点击成功")
-                except:
-                    # 找不到 checkbox，直接点击 iframe 中央
-                    from selenium.webdriver.common.action_chains import ActionChains
-                    ActionChains(sb.driver).move_by_offset(15, 15).click().perform()
-                    print(f"[{email}]   iframe 中央点击")
-                finally:
-                    sb.driver.switch_to.default_content()
-                time.sleep(3)
-                if wait_for_turnstile_token(sb, max_wait=8):
-                    return True
-                break
-    except Exception as e:
-        print(f"[{email}] 策略3 失败: {e}")
-        try:
-            sb.driver.switch_to.default_content()
-        except:
-            pass
-
-    # 策略4: uc_gui_handle_captcha
-    print(f"[{email}] Turnstile 策略4: uc_gui_handle_captcha...")
-    try:
-        sb.uc_gui_handle_captcha()
-        time.sleep(3)
-        if wait_for_turnstile_token(sb, max_wait=8):
-            return True
-    except Exception as e:
-        print(f"[{email}] 策略4 失败: {e}")
-
     return False
 
 def login_one(email: str, password: str) -> dict:
     from seleniumbase import SB
 
     result = {"email": email, "success": False, "server_status": None, "reason": ""}
-    max_retries = 2
     proxy = f"http://127.0.0.1:{GOST_LOCAL_PORT}"
 
-    for attempt in range(max_retries + 1):
-        try:
-            print(f"[{email}] 尝试 {attempt + 1}: 启动 UC 模式浏览器...")
-            with SB(
-                uc=True,
-                headless=False,
-                xvfb=True,
-                proxy=proxy,
-                incognito=True,
-            ) as sb:
-                print(f"[{email}] 打开登录页...")
+    try:
+        print(f"[{email}] 启动 UC 模式浏览器...")
+        with SB(
+            uc=True,
+            headless=False,
+            xvfb=True,
+            proxy=proxy,
+            incognito=True,
+        ) as sb:
+
+            # ── 步骤1: 登录 ──
+            print(f"[{email}] 打开登录页...")
+            sb.open(LOGIN_URL)
+            sb.sleep(5)
+
+            need_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
+            print(f"[{email}] 是否需要登录: {need_login}，当前URL: {sb.get_current_url()}")
+
+            if need_login:
+                print(f"[{email}] 填写账号密码...")
+                sb.type('input[type="email"], input[placeholder*="Email"]', email)
+                sb.sleep(0.5)
+                sb.type('input[type="password"]', password)
+                sb.sleep(1)
+
+                # 只用有效的 uc_gui_handle_captcha 处理 Turnstile
+                print(f"[{email}] 处理 Turnstile（uc_gui_handle_captcha）...")
+                try:
+                    sb.uc_gui_handle_captcha()
+                    sb.sleep(3)
+                    token = sb.execute_script(
+                        'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
+                    )
+                    print(f"[{email}] Turnstile token 长度: {len(token) if token else 0}")
+                except Exception as e:
+                    print(f"[{email}] uc_gui_handle_captcha 失败: {e}")
+
+                print(f"[{email}] 点击登录按钮...")
+                sb.click('button:contains("Log In")')
+                sb.sleep(8)
+
+                current_url = sb.get_current_url()
+                print(f"[{email}] 登录后URL: {current_url}")
+
+                still_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
+                if still_login:
+                    shot = f"error_login_{email.replace('@','_')}.png"
+                    sb.save_screenshot(shot)
+                    tg_notify_photo_sync(shot, caption=f"❌ 登录失败\n账号: <code>{email}</code>\nURL: {current_url}")
+                    raise Exception("登录失败，仍停留在登录页（Turnstile未通过）")
+
+                print(f"[{email}] ✅ 登录成功！")
+            else:
+                print(f"[{email}] ✅ 已有登录态")
+
+            result["success"] = True
+
+            # ── 步骤2: 确保在列表页，等待渲染 ──
+            current_url = sb.get_current_url()
+            if LOGIN_URL not in current_url:
+                print(f"[{email}] 当前不在列表页（{current_url}），跳转回列表页...")
                 sb.open(LOGIN_URL)
                 sb.sleep(5)
 
-                need_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
-                print(f"[{email}] 是否需要登录: {need_login}，当前URL: {sb.get_current_url()}")
+            print(f"[{email}] 等待服务器列表渲染（8秒）...")
+            sb.sleep(8)
 
-                if need_login:
-                    # 先填账号密码
-                    print(f"[{email}] 填写账号密码...")
-                    sb.type('input[type="email"], input[placeholder*="Email"]', email)
-                    sb.sleep(0.5)
-                    sb.type('input[type="password"]', password)
-                    sb.sleep(1)
+            # ── 步骤3: 读取列表页状态 ──
+            status_els = sb.find_elements('.server-status-text')
+            list_statuses = [el.text.strip().lower() for el in status_els]
+            print(f"[{email}] 列表页服务器状态: {list_statuses}")
 
-                    # 截图看填写后状态
-                    shot = f"before_captcha_{email.replace('@','_')}_{attempt+1}.png"
-                    sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"📋 填写后截图（第{attempt+1}次）\n账号: <code>{email}</code>")
+            if not list_statuses:
+                shot = f"debug_list_{email.replace('@','_')}.png"
+                sb.save_screenshot(shot)
+                tg_notify_photo_sync(shot, caption=f"🔍 列表页截图\n找不到状态元素\nURL: {sb.get_current_url()}")
+                raise Exception("找不到 .server-status-text，列表页未正确加载")
 
-                    # 多策略处理 Turnstile
-                    turnstile_ok = handle_turnstile(sb, email)
-                    print(f"[{email}] Turnstile 处理结果: {'✅ 通过' if turnstile_ok else '❌ 未通过'}")
+            has_offline = any("offline" in s for s in list_statuses)
 
-                    # 截图看 Turnstile 处理后状态
-                    shot2 = f"after_captcha_{email.replace('@','_')}_{attempt+1}.png"
-                    sb.save_screenshot(shot2)
-                    tg_notify_photo_sync(shot2, caption=f"📋 Turnstile处理后截图（第{attempt+1}次）\ntoken通过: {turnstile_ok}")
-
-                    # 点击登录
-                    print(f"[{email}] 点击登录按钮...")
-                    sb.click('button:contains("Log In")')
-                    sb.sleep(8)
-
-                    current_url = sb.get_current_url()
-                    print(f"[{email}] 登录后URL: {current_url}")
-
-                    still_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
-                    if still_login:
-                        shot3 = f"error_login_{email.replace('@','_')}_{attempt+1}.png"
-                        sb.save_screenshot(shot3)
-                        tg_notify_photo_sync(shot3, caption=f"❌ 第{attempt+1}次登录失败\nURL: {current_url}")
-                        raise Exception("登录失败，仍停留在登录页")
-
-                    print(f"[{email}] ✅ 登录成功！")
-                else:
-                    print(f"[{email}] ✅ 已有登录态")
-
-                result["success"] = True
-
-                # 等待列表页渲染
-                print(f"[{email}] 等待服务器列表渲染（8秒）...")
-                sb.sleep(8)
-
-                # 读取服务器状态
-                status_els = sb.find_elements('.server-status-text')
-                list_statuses = [el.text.strip().lower() for el in status_els]
-                print(f"[{email}] 列表页服务器状态: {list_statuses}")
-
-                if not list_statuses:
-                    shot = f"debug_list_{email.replace('@','_')}.png"
-                    sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"🔍 列表页截图\n找不到状态元素\nURL: {sb.get_current_url()}")
-                    raise Exception("找不到 .server-status-text，列表页未正确加载")
-
-                has_offline = any("offline" in s for s in list_statuses)
-
-                if not has_offline:
-                    print(f"[{email}] ✅ 所有服务器在线，无需操作")
-                    result["server_status"] = "already_online"
-                    return result
-
-                # 有离线服务器，点击 Manage Server
-                print(f"[{email}] 检测到离线，寻找 Manage Server 按钮...")
-                manage_sel = None
-                for sel in ['.server-action-btn.primary', 'button:contains("Manage Server")']:
-                    try:
-                        if sb.is_element_present(sel):
-                            manage_sel = sel
-                            break
-                    except:
-                        pass
-
-                if not manage_sel:
-                    shot = f"debug_manage_{email.replace('@','_')}.png"
-                    sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"🔍 找不到 Manage Server\nURL: {sb.get_current_url()}")
-                    raise Exception("找不到 Manage Server 按钮")
-
-                print(f"[{email}] 点击 Manage Server...")
-                sb.click(manage_sel)
-                sb.sleep(5)
-                print(f"[{email}] ✅ 已进入 Console 页，URL: {sb.get_current_url()}")
-
-                # Console 页确认状态
-                sb.wait_for_element('#online-status-text', timeout=20)
-                status_text = sb.get_text('#online-status-text').strip()
-                print(f"[{email}] Console 页状态: [{status_text}]")
-
-                if status_text.lower() == "online":
-                    print(f"[{email}] ✅ 服务器在线")
-                    result["server_status"] = "already_online"
-                    return result
-
-                # 离线则点击 Start
-                print(f"[{email}] 服务器离线，点击 Start...")
-                sb.click('#start-btn')
-                print(f"[{email}] 已点击 Start，等待启动（最多60秒）...")
-
-                started = False
-                for _ in range(60):
-                    sb.sleep(1)
-                    try:
-                        cur = sb.get_text('#online-status-text').strip().lower()
-                        if cur == "online":
-                            started = True
-                            break
-                    except:
-                        pass
-
-                if started:
-                    print(f"[{email}] ✅ 服务器已成功启动！")
-                    result["server_status"] = "restarted"
-                else:
-                    print(f"[{email}] ⚠️ 60秒内未变为 Online")
-                    shot = f"warn_{email.replace('@','_')}_{int(time.time())}.png"
-                    sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>")
-                    result["server_status"] = "restart_timeout"
-
+            if not has_offline:
+                print(f"[{email}] ✅ 所有服务器在线，无需操作")
+                result["server_status"] = "already_online"
                 return result
 
-        except Exception as e:
-            print(f"[{email}] 第 {attempt + 1} 次失败: {e}")
-            result["reason"] = str(e)[:200]
-            if attempt >= max_retries:
-                tg_notify_sync(f"❌ Wispbyte 最终失败\n账号: <code>{email}</code>\n原因: {str(e)[:200]}")
+            # ── 步骤4: 点击 Manage Server 进入 Console ──
+            print(f"[{email}] 检测到离线，寻找 Manage Server 按钮...")
+            manage_sel = None
+            for sel in ['.server-action-btn.primary', 'button:contains("Manage Server")']:
+                try:
+                    if sb.is_element_present(sel):
+                        manage_sel = sel
+                        break
+                except:
+                    pass
+
+            if not manage_sel:
+                shot = f"debug_manage_{email.replace('@','_')}.png"
+                sb.save_screenshot(shot)
+                tg_notify_photo_sync(shot, caption=f"🔍 找不到 Manage Server\nURL: {sb.get_current_url()}")
+                raise Exception("找不到 Manage Server 按钮")
+
+            print(f"[{email}] 点击 Manage Server...")
+            sb.click(manage_sel)
+            sb.sleep(8)  # 等待 Console 页加载（含广告）
+            print(f"[{email}] ✅ 已进入 Console 页，URL: {sb.get_current_url()}")
+
+            # ── 步骤5: 读取 Console 页状态（多方式，已知离线也直接点 Start）──
+            status = get_server_status(sb, email)
+            print(f"[{email}] Console 页状态: [{status}]")
+
+            if status == "online":
+                print(f"[{email}] ✅ 服务器在线，无需操作")
+                result["server_status"] = "already_online"
+                return result
+
+            # status 是 offline 或 unknown，因为列表页已确认离线，直接尝试启动
+            print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
+
+            # ── 步骤6: 点击 Start ──
+            try:
+                start_btn = sb.driver.find_element("css selector", "#start-btn")
+                start_btn.click()
+                print(f"[{email}] ✅ 已点击 Start，等待启动（最多60秒）...")
+            except Exception as e:
+                shot = f"debug_start_{email.replace('@','_')}.png"
+                sb.save_screenshot(shot)
+                tg_notify_photo_sync(shot, caption=f"🔍 找不到 Start 按钮\n错误: {str(e)[:100]}")
+                raise Exception(f"找不到 Start 按钮: {e}")
+
+            # ── 步骤7: 等待上线 ──
+            started = wait_for_online(sb, email, max_seconds=60)
+
+            if started:
+                print(f"[{email}] ✅ 服务器已成功启动！")
+                result["server_status"] = "restarted"
+            else:
+                print(f"[{email}] ⚠️ 60秒内未变为 Online")
+                shot = f"warn_{email.replace('@','_')}_{int(time.time())}.png"
+                sb.save_screenshot(shot)
+                tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>\n已点击 Start 但60秒内未上线")
+                result["server_status"] = "restart_timeout"
+
+            return result
+
+    except Exception as e:
+        print(f"[{email}] 执行失败: {e}")
+        result["reason"] = str(e)[:200]
+        tg_notify_sync(f"❌ Wispbyte 失败\n账号: <code>{email}</code>\n原因: {str(e)[:200]}")
 
     return result
 
