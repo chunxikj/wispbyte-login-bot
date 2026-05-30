@@ -132,13 +132,18 @@ async def login_one(email: str, password: str):
                     result["success"] = True
                     print(f"[{email}] 登录成功！当前URL: {page.url}")
 
-                # ── 新增：检查服务器列表页的状态 ──
-                print(f"[{email}] 检查服务器列表页状态...")
-                await page.wait_for_load_state("networkidle", timeout=20000)
-                await asyncio.sleep(2)
+                # ── 新增：检查服务器列表页状态 ──
+                # 用固定等待替代 networkidle，避免 WebSocket 导致永远等不完
+                print(f"[{email}] 等待列表页渲染（8秒）...")
+                await asyncio.sleep(8)
+                print(f"[{email}] 当前URL: {page.url}")
 
-                # 读取服务器列表页的状态标签
-                # selector: .server-status-text
+                # 截图确认页面内容（调试用，成功后可删除）
+                debug_shot = f"list_{email.replace('@','_')}.png"
+                await page.screenshot(path=debug_shot, full_page=True)
+                await tg_notify_photo(debug_shot, caption=f"📋 列表页截图\n账号: <code>{email}</code>\nURL: {page.url}")
+
+                # 读取服务器列表页的状态
                 status_els = await page.query_selector_all('.server-status-text')
                 list_statuses = []
                 for el in status_els:
@@ -146,7 +151,10 @@ async def login_one(email: str, password: str):
                     list_statuses.append(t)
                 print(f"[{email}] 列表页服务器状态: {list_statuses}")
 
-                # 判断是否有离线服务器
+                # 如果找不到状态元素，说明页面可能没有正确加载
+                if not list_statuses:
+                    raise Exception("找不到 .server-status-text 元素，页面可能未正确加载")
+
                 has_offline = any("offline" in s for s in list_statuses)
 
                 if not has_offline:
@@ -154,55 +162,25 @@ async def login_one(email: str, password: str):
                     result["server_status"] = "already_online"
                     break
 
-                # ── 有离线服务器，找到对应的 Manage Server 按钮点击 ──
+                # ── 有离线服务器，点击 Manage Server ──
                 print(f"[{email}] 检测到离线服务器，寻找 Manage Server 按钮...")
 
-                # 找到状态为 offline 的服务器卡片，点击其 Manage Server 按钮
-                # 通过 .server-status-indicator[data-status*="offline"] 定位卡片
                 manage_btn = None
+
+                # 方法1：找 .server-action-btn.primary
                 try:
-                    # 找到 offline 状态指示器所在的父容器，再找 Manage Server 按钮
-                    offline_indicator = await page.query_selector(
-                        '.server-status-indicator[data-status*="offline"], '
-                        '.server-status-text'
-                    )
-                    if offline_indicator:
-                        # 向上找到包含 Manage Server 按钮的父容器
-                        manage_btn = await offline_indicator.evaluate_handle(
-                            '''el => {
-                                // 向上找到包含 server-action-btn 的祖先
-                                let node = el;
-                                for (let i = 0; i < 10; i++) {
-                                    node = node.parentElement;
-                                    if (!node) break;
-                                    const btn = node.querySelector('.server-action-btn');
-                                    if (btn) return btn;
-                                }
-                                return null;
-                            }'''
-                        )
-                        # 检查是否真的找到了元素
-                        is_null = await manage_btn.evaluate('el => el === null')
-                        if is_null:
-                            manage_btn = None
-                except Exception as e1:
-                    print(f"[{email}] 方法1异常: {e1}")
+                    manage_btn = await page.query_selector('.server-action-btn.primary')
+                    if manage_btn:
+                        print(f"[{email}] 找到 .server-action-btn.primary")
+                except:
                     manage_btn = None
 
-                # 降级：直接找 .server-action-btn.primary 或 Manage Server 文字
-                if not manage_btn:
-                    try:
-                        manage_btn = await page.query_selector('.server-action-btn.primary')
-                        if manage_btn:
-                            print(f"[{email}] 降级方法：找到 .server-action-btn.primary")
-                    except:
-                        manage_btn = None
-
+                # 方法2：找文字
                 if not manage_btn:
                     try:
                         manage_btn = await page.query_selector('button:has-text("Manage Server")')
                         if manage_btn:
-                            print(f"[{email}] 降级方法：找到 Manage Server 文字按钮")
+                            print(f"[{email}] 找到 Manage Server 文字按钮")
                     except:
                         manage_btn = None
 
@@ -212,13 +190,13 @@ async def login_one(email: str, password: str):
                     await tg_notify_photo(screenshot, caption=f"🔍 调试截图\n账号: <code>{email}</code>\n找不到 Manage Server 按钮\nURL: {page.url}")
                     raise Exception(f"找不到 Manage Server 按钮，URL: {page.url}")
 
-                print(f"[{email}] 找到 Manage Server 按钮，点击进入 Console...")
+                print(f"[{email}] 点击 Manage Server 进入 Console...")
                 await manage_btn.click()
                 await page.wait_for_load_state("domcontentloaded", timeout=30000)
-                await asyncio.sleep(3)
+                await asyncio.sleep(5)
                 print(f"[{email}] ✅ 已进入 Console 页，URL: {page.url}")
 
-                # ── 再次确认 Console 页服务器状态 ──
+                # ── Console 页确认状态 ──
                 print(f"[{email}] 读取 Console 页服务器状态...")
                 status_el = await page.wait_for_selector('#online-status-text', timeout=20000)
                 status_text = (await status_el.inner_text()).strip()
@@ -229,23 +207,21 @@ async def login_one(email: str, password: str):
                     result["server_status"] = "already_online"
                     break
 
-                # ── 服务器离线，点击 Start 按钮 ──
+                # ── 离线则点击 Start ──
                 print(f"[{email}] 服务器 [{status_text}]，点击 Start 启动...")
                 start_btn = await page.wait_for_selector('#start-btn', timeout=10000)
                 await start_btn.click()
                 print(f"[{email}] 已点击 Start，等待启动（最多60秒）...")
 
-                # ── 等待状态变为 Online ──
                 try:
                     await page.wait_for_function(
                         'document.getElementById("online-status-text")?.textContent?.trim().toLowerCase() === "online"',
                         timeout=60000
                     )
-                    final_status = (await (await page.query_selector('#online-status-text')).inner_text()).strip()
-                    print(f"[{email}] ✅ 服务器已成功启动！当前状态: {final_status}")
+                    print(f"[{email}] ✅ 服务器已成功启动！")
                     result["server_status"] = "restarted"
                 except:
-                    print(f"[{email}] ⚠️ 等待60秒后仍未变为 Online，截图留证")
+                    print(f"[{email}] ⚠️ 60秒内未变为 Online")
                     screenshot = f"warn_{email.replace('@','_')}_{int(datetime.now().timestamp())}.png"
                     await page.screenshot(path=screenshot, full_page=True)
                     await tg_notify_photo(
@@ -258,6 +234,17 @@ async def login_one(email: str, password: str):
             except Exception as e:
                 print(f"[{email}] 第 {attempt + 1} 次失败: {e}")
                 result["reason"] = str(e)[:200]
+                # 每次失败都截图
+                try:
+                    screenshot = f"error_{email.replace('@','_')}_{attempt + 1}.png"
+                    await page.screenshot(path=screenshot, full_page=True)
+                    await tg_notify_photo(
+                        screenshot,
+                        caption=f"❌ 第{attempt + 1}次失败\n账号: <code>{email}</code>\n错误: <i>{str(e)[:200]}</i>\nURL: {page.url}"
+                    )
+                except:
+                    pass
+
                 if attempt < max_retries:
                     await context.close()
                     context = await browser.new_context(
@@ -267,13 +254,6 @@ async def login_one(email: str, password: str):
                     page = await context.new_page()
                     page.set_default_timeout(90000)
                     await asyncio.sleep(2)
-                else:
-                    screenshot = f"error_{email.replace('@','_')}_{int(datetime.now().timestamp())}.png"
-                    await page.screenshot(path=screenshot, full_page=True)
-                    await tg_notify_photo(
-                        screenshot,
-                        caption=f"❌ Wispbyte 操作失败\n账号: <code>{email}</code>\n错误: <i>{str(e)[:200]}</i>\nURL: {page.url}"
-                    )
 
         await context.close()
         await browser.close()
