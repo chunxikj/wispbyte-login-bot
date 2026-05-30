@@ -1,5 +1,4 @@
 name: Wispbyte Auto Login
-
 on:
   schedule:
     - cron: '31 21 */3 * *'    # 每3天UTC 21点31分
@@ -9,7 +8,7 @@ jobs:
   login:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,12 +35,24 @@ jobs:
           playwright install chromium --with-deps
           echo "依赖安装完成"
 
+      - name: Install gost
+        run: |
+          echo "安装 gost 代理工具..."
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          mv gost-linux-amd64-2.11.5 gost
+          chmod +x gost
+          sudo mv gost /usr/local/bin/gost
+          gost -V
+          echo "gost 安装完成"
+
       - name: Run login script
         timeout-minutes: 6
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           LOGIN_ACCOUNTS: ${{ secrets.LOGIN_ACCOUNTS }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
         run: |
           echo "开始执行 login.py（最多 5 分钟）"
           timeout 5m python login.py && echo "login.py 成功完成" || echo "脚本执行失败或被超时中断"
@@ -57,5 +68,5 @@ jobs:
         with:
           to: ${{ secrets.TG_CHAT_ID }}
           token: ${{ secrets.TG_BOT_TOKEN }}
-          message: "*GitHub Actions 异常*\n\n状态：`${{ needs.login.result }}`\n${{ needs.login.result == 'cancelled' && '超时自动取消' || '脚本执行失败' }}\n\n查看日志：\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n发 `/retry` 手动重试"
+          message: "*GitHub Actions 异常*\n\n状态：`${{ needs.login.result }}`\n${{ needs.login.result == 'cancelled' && '超时自动取消' || '脚本执行失败' }}\n\n查看日志：\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           format: markdown
