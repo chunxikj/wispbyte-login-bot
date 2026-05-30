@@ -61,22 +61,18 @@ def build_report(results, start_time, end_time):
         f"时间: {start_time} → {end_time}",
         ""
     ]
-
     if online:
         lines.append("✅ 服务器在线（无需操作）：")
         lines.extend([f"• <code>{r['email']}</code>" for r in online])
         lines.append("")
-
     if restarted:
         lines.append("🔄 检测到离线，已成功启动：")
         lines.extend([f"• <code>{r['email']}</code>" for r in restarted])
         lines.append("")
-
     if timeout:
         lines.append("⚠️ 已点击启动，但未确认上线（超时）：")
         lines.extend([f"• <code>{r['email']}</code>" for r in timeout])
         lines.append("")
-
     if failed:
         lines.append("❌ 失败账号：")
         lines.extend([f"• <code>{r['email']}</code>  原因: {r.get('reason', '未知')}" for r in failed])
@@ -103,47 +99,59 @@ async def login_one(email: str, password: str):
 
         for attempt in range(max_retries + 1):
             try:
-                # ── 原始登录逻辑（完全不变）──
                 print(f"[{email}] 尝试 {attempt + 1}: 打开登录页...")
                 await page.goto(LOGIN_URL, wait_until="load", timeout=90000)
                 await page.wait_for_load_state("domcontentloaded", timeout=30000)
                 await asyncio.sleep(5)
 
-                if "client" in page.url and "login" not in page.url.lower():
-                    print(f"[{email}] 已登录！当前URL: {page.url}")
-                    result["success"] = True
-                else:
-                    await page.wait_for_selector(
-                        'input[placeholder*="Email"], input[placeholder*="Username"], input[type="email"], input[type="text"]',
-                        timeout=20000
-                    )
-                    await page.fill('input[placeholder*="Email"], input[placeholder*="Username"], input[type="email"], input[type="text"]', email)
-                    await page.fill('input[placeholder*="Password"], input[type="password"]', password)
+                # ── 关键修复：用页面元素判断是否需要登录，而非URL ──
+                # 检查页面上是否存在登录表单（Email输入框）
+                login_form = await page.query_selector('input[type="email"], input[placeholder*="Email"]')
+                need_login = login_form is not None
+                print(f"[{email}] 是否需要登录: {need_login}，当前URL: {page.url}")
 
-                    try:
-                        await page.wait_for_selector('text=确认您是真人, input[type="checkbox"]', timeout=10000)
-                        await page.click('text=确认您是真人')
-                        await asyncio.sleep(3)
-                    except:
-                        pass
+                if need_login:
+                    print(f"[{email}] 检测到登录表单，开始填写...")
+                    await login_form.fill(email)
+                    await page.fill('input[placeholder*="Password"], input[type="password"]', password)
+                    print(f"[{email}] 已填写账号密码，等待 Turnstile 验证...")
+
+                    # 等待 Turnstile 自动完成（最多等20秒）
+                    for _ in range(20):
+                        await asyncio.sleep(1)
+                        try:
+                            token_val = await page.evaluate(
+                                'document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
+                            )
+                            if token_val and len(token_val) > 10:
+                                print(f"[{email}] Turnstile 验证已完成")
+                                break
+                        except:
+                            pass
+                    else:
+                        print(f"[{email}] Turnstile 等待超时，尝试直接提交...")
 
                     await page.click('button:has-text("Log In")')
-                    await page.wait_for_url("**/client**", timeout=30000)
-                    result["success"] = True
-                    print(f"[{email}] 登录成功！当前URL: {page.url}")
+                    print(f"[{email}] 已点击登录，等待页面跳转...")
+                    await asyncio.sleep(8)
+                    print(f"[{email}] 登录后URL: {page.url}")
 
-                # ── 新增：检查服务器列表页状态 ──
-                # 用固定等待替代 networkidle，避免 WebSocket 导致永远等不完
-                print(f"[{email}] 等待列表页渲染（8秒）...")
+                    # 再次检查是否还在登录页
+                    still_login = await page.query_selector('input[type="email"], input[placeholder*="Email"]')
+                    if still_login:
+                        raise Exception("登录失败，仍停留在登录页（可能Turnstile未通过）")
+
+                    print(f"[{email}] ✅ 登录成功！")
+                else:
+                    print(f"[{email}] ✅ 已有登录态，无需重新登录")
+
+                result["success"] = True
+
+                # ── 等待列表页内容渲染 ──
+                print(f"[{email}] 等待服务器列表渲染（8秒）...")
                 await asyncio.sleep(8)
-                print(f"[{email}] 当前URL: {page.url}")
 
-                # 截图确认页面内容（调试用，成功后可删除）
-                debug_shot = f"list_{email.replace('@','_')}.png"
-                await page.screenshot(path=debug_shot, full_page=True)
-                await tg_notify_photo(debug_shot, caption=f"📋 列表页截图\n账号: <code>{email}</code>\nURL: {page.url}")
-
-                # 读取服务器列表页的状态
+                # 读取服务器状态
                 status_els = await page.query_selector_all('.server-status-text')
                 list_statuses = []
                 for el in status_els:
@@ -151,9 +159,12 @@ async def login_one(email: str, password: str):
                     list_statuses.append(t)
                 print(f"[{email}] 列表页服务器状态: {list_statuses}")
 
-                # 如果找不到状态元素，说明页面可能没有正确加载
                 if not list_statuses:
-                    raise Exception("找不到 .server-status-text 元素，页面可能未正确加载")
+                    # 截图帮助调试
+                    shot = f"debug_list_{email.replace('@','_')}.png"
+                    await page.screenshot(path=shot, full_page=True)
+                    await tg_notify_photo(shot, caption=f"🔍 列表页调试截图\n账号: <code>{email}</code>\n找不到状态元素\nURL: {page.url}")
+                    raise Exception("找不到 .server-status-text 元素，列表页未正确加载")
 
                 has_offline = any("offline" in s for s in list_statuses)
 
@@ -165,30 +176,16 @@ async def login_one(email: str, password: str):
                 # ── 有离线服务器，点击 Manage Server ──
                 print(f"[{email}] 检测到离线服务器，寻找 Manage Server 按钮...")
 
-                manage_btn = None
-
-                # 方法1：找 .server-action-btn.primary
-                try:
-                    manage_btn = await page.query_selector('.server-action-btn.primary')
-                    if manage_btn:
-                        print(f"[{email}] 找到 .server-action-btn.primary")
-                except:
-                    manage_btn = None
-
-                # 方法2：找文字
-                if not manage_btn:
-                    try:
-                        manage_btn = await page.query_selector('button:has-text("Manage Server")')
-                        if manage_btn:
-                            print(f"[{email}] 找到 Manage Server 文字按钮")
-                    except:
-                        manage_btn = None
+                manage_btn = (
+                    await page.query_selector('.server-action-btn.primary') or
+                    await page.query_selector('button:has-text("Manage Server")')
+                )
 
                 if not manage_btn:
-                    screenshot = f"debug_{email.replace('@','_')}_{int(datetime.now().timestamp())}.png"
-                    await page.screenshot(path=screenshot, full_page=True)
-                    await tg_notify_photo(screenshot, caption=f"🔍 调试截图\n账号: <code>{email}</code>\n找不到 Manage Server 按钮\nURL: {page.url}")
-                    raise Exception(f"找不到 Manage Server 按钮，URL: {page.url}")
+                    shot = f"debug_manage_{email.replace('@','_')}.png"
+                    await page.screenshot(path=shot, full_page=True)
+                    await tg_notify_photo(shot, caption=f"🔍 调试截图\n找不到 Manage Server 按钮\nURL: {page.url}")
+                    raise Exception("找不到 Manage Server 按钮")
 
                 print(f"[{email}] 点击 Manage Server 进入 Console...")
                 await manage_btn.click()
@@ -197,7 +194,6 @@ async def login_one(email: str, password: str):
                 print(f"[{email}] ✅ 已进入 Console 页，URL: {page.url}")
 
                 # ── Console 页确认状态 ──
-                print(f"[{email}] 读取 Console 页服务器状态...")
                 status_el = await page.wait_for_selector('#online-status-text', timeout=20000)
                 status_text = (await status_el.inner_text()).strip()
                 print(f"[{email}] Console 页状态: [{status_text}]")
@@ -208,7 +204,7 @@ async def login_one(email: str, password: str):
                     break
 
                 # ── 离线则点击 Start ──
-                print(f"[{email}] 服务器 [{status_text}]，点击 Start 启动...")
+                print(f"[{email}] 服务器离线，点击 Start 启动...")
                 start_btn = await page.wait_for_selector('#start-btn', timeout=10000)
                 await start_btn.click()
                 print(f"[{email}] 已点击 Start，等待启动（最多60秒）...")
@@ -222,24 +218,20 @@ async def login_one(email: str, password: str):
                     result["server_status"] = "restarted"
                 except:
                     print(f"[{email}] ⚠️ 60秒内未变为 Online")
-                    screenshot = f"warn_{email.replace('@','_')}_{int(datetime.now().timestamp())}.png"
-                    await page.screenshot(path=screenshot, full_page=True)
-                    await tg_notify_photo(
-                        screenshot,
-                        caption=f"⚠️ Wispbyte 启动超时\n账号: <code>{email}</code>\n已点击 Start 但60秒内未变为 Online"
-                    )
+                    shot = f"warn_{email.replace('@','_')}_{int(datetime.now().timestamp())}.png"
+                    await page.screenshot(path=shot, full_page=True)
+                    await tg_notify_photo(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>\n已点击 Start 但60秒内未变为 Online")
                     result["server_status"] = "restart_timeout"
                 break
 
             except Exception as e:
                 print(f"[{email}] 第 {attempt + 1} 次失败: {e}")
                 result["reason"] = str(e)[:200]
-                # 每次失败都截图
                 try:
-                    screenshot = f"error_{email.replace('@','_')}_{attempt + 1}.png"
-                    await page.screenshot(path=screenshot, full_page=True)
+                    shot = f"error_{email.replace('@','_')}_{attempt + 1}.png"
+                    await page.screenshot(path=shot, full_page=True)
                     await tg_notify_photo(
-                        screenshot,
+                        shot,
                         caption=f"❌ 第{attempt + 1}次失败\n账号: <code>{email}</code>\n错误: <i>{str(e)[:200]}</i>\nURL: {page.url}"
                     )
                 except:
