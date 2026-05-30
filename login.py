@@ -1,12 +1,12 @@
 import os
 import sys
-import re
 import asyncio
 import subprocess
 import time
 from datetime import datetime
 
 LOGIN_URL = "https://wispbyte.com/client/servers"
+CONSOLE_URL = "https://wispbyte.com/client/servers/67461084/console"
 GOST_LOCAL_PORT = 18080
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
@@ -104,10 +104,7 @@ def build_report(results, start_time, end_time):
     return "\n".join(lines)
 
 def get_server_status(sb, email: str) -> str:
-    """
-    多方式读取 Console 页服务器状态
-    返回: 'online' / 'offline' / 'unknown'
-    """
+    """多方式读取 Console 页服务器状态，返回 online/offline/unknown"""
     # 方式1: #online-status-text
     try:
         el = sb.driver.find_element("css selector", "#online-status-text")
@@ -126,20 +123,20 @@ def get_server_status(sb, email: str) -> str:
             print(f"[{email}] 状态来源 #server-uptime-panel: [{text}]")
             if "offline" in text:
                 return "offline"
-            if text and text != "offline":
+            if text:
                 return "online"
     except:
         pass
 
-    # 方式3: #start-btn 是否 disabled
+    # 方式3: #start-btn disabled 属性
     try:
         btn = sb.driver.find_element("css selector", "#start-btn")
         disabled = btn.get_attribute("disabled")
         if disabled:
-            print(f"[{email}] 状态来源 #start-btn disabled=True → online")
+            print(f"[{email}] #start-btn disabled → online")
             return "online"
         else:
-            print(f"[{email}] 状态来源 #start-btn disabled=False → offline")
+            print(f"[{email}] #start-btn not disabled → offline")
             return "offline"
     except:
         pass
@@ -173,7 +170,7 @@ def login_one(email: str, password: str) -> dict:
             incognito=True,
         ) as sb:
 
-            # ── 步骤1: 登录 ──
+            # ── 步骤1: 打开登录页 ──
             print(f"[{email}] 打开登录页...")
             sb.open(LOGIN_URL)
             sb.sleep(5)
@@ -188,7 +185,7 @@ def login_one(email: str, password: str) -> dict:
                 sb.type('input[type="password"]', password)
                 sb.sleep(1)
 
-                print(f"[{email}] 处理 Turnstile（uc_gui_handle_captcha）...")
+                print(f"[{email}] 处理 Turnstile...")
                 try:
                     sb.uc_gui_handle_captcha()
                     sb.sleep(3)
@@ -219,76 +216,13 @@ def login_one(email: str, password: str) -> dict:
 
             result["success"] = True
 
-            # ── 步骤2: 确保在列表页 ──
-            current_url = sb.get_current_url()
-            if "client/servers" not in current_url or "console" in current_url:
-                print(f"[{email}] 跳转回列表页...")
-                sb.open(LOGIN_URL)
-                sb.sleep(5)
-
-            print(f"[{email}] 等待服务器列表渲染（8秒）...")
+            # ── 步骤2: 直接跳转 Console 页 ──
+            print(f"[{email}] 直接跳转 Console 页: {CONSOLE_URL}")
+            sb.open(CONSOLE_URL)
             sb.sleep(8)
+            print(f"[{email}] 当前URL: {sb.get_current_url()}")
 
-            # ── 步骤3: 读取列表页状态 ──
-            status_els = sb.find_elements('.server-status-text')
-            list_statuses = [el.text.strip().lower() for el in status_els]
-            print(f"[{email}] 列表页服务器状态: {list_statuses}")
-
-            if not list_statuses:
-                shot = f"debug_list_{email.replace('@','_')}.png"
-                sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"🔍 列表页截图\n找不到状态元素\nURL: {sb.get_current_url()}")
-                raise Exception("找不到 .server-status-text，列表页未正确加载")
-
-            has_offline = any("offline" in s for s in list_statuses)
-
-            if not has_offline:
-                print(f"[{email}] ✅ 所有服务器在线，无需操作")
-                result["server_status"] = "already_online"
-                return result
-
-            # ── 步骤4: 从按钮 onclick 提取服务器ID，直接跳转 Console URL ──
-            print(f"[{email}] 检测到离线，提取服务器ID...")
-            console_url = None
-
-            # 方式1: 从 .server-action-btn.primary 的 onclick 提取
-            try:
-                btn = sb.driver.find_element("css selector", ".server-action-btn.primary")
-                onclick = btn.get_attribute("onclick") or ""
-                print(f"[{email}] onclick 内容: {onclick[:100]}")
-                match = re.search(r"servers/(\w+)/console", onclick)
-                if match:
-                    server_id = match.group(1)
-                    console_url = f"https://wispbyte.com/client/servers/{server_id}/console"
-                    print(f"[{email}] 提取到服务器ID: {server_id}")
-            except Exception as e:
-                print(f"[{email}] 方式1提取失败: {e}")
-
-            # 方式2: 从页面 HTML 正则提取
-            if not console_url:
-                try:
-                    html = sb.driver.page_source
-                    match = re.search(r"servers/([a-f0-9]{8})/console", html)
-                    if match:
-                        server_id = match.group(1)
-                        console_url = f"https://wispbyte.com/client/servers/{server_id}/console"
-                        print(f"[{email}] 方式2提取到服务器ID: {server_id}")
-                except Exception as e:
-                    print(f"[{email}] 方式2提取失败: {e}")
-
-            if not console_url:
-                shot = f"debug_noid_{email.replace('@','_')}.png"
-                sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"🔍 无法提取服务器ID\nURL: {sb.get_current_url()}")
-                raise Exception("无法从页面提取服务器ID")
-
-            # ── 步骤5: 直接跳转 Console 页 ──
-            print(f"[{email}] 直接跳转 Console: {console_url}")
-            sb.open(console_url)
-            sb.sleep(8)
-            print(f"[{email}] ✅ 已进入 Console 页，URL: {sb.get_current_url()}")
-
-            # ── 步骤6: 读取 Console 页状态 ──
+            # ── 步骤3: 读取服务器状态 ──
             status = get_server_status(sb, email)
             print(f"[{email}] Console 页状态: [{status}]")
 
@@ -297,10 +231,8 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # 离线或 unknown，列表页已确认离线，直接点 Start
+            # ── 步骤4: 离线则点击 Start ──
             print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
-
-            # ── 步骤7: 点击 Start ──
             try:
                 start_btn = sb.driver.find_element("css selector", "#start-btn")
                 start_btn.click()
@@ -311,7 +243,7 @@ def login_one(email: str, password: str) -> dict:
                 tg_notify_photo_sync(shot, caption=f"🔍 找不到 Start 按钮\n错误: {str(e)[:100]}")
                 raise Exception(f"找不到 Start 按钮: {e}")
 
-            # ── 步骤8: 等待上线 ──
+            # ── 步骤5: 等待上线 ──
             started = wait_for_online(sb, email, max_seconds=60)
 
             if started:
