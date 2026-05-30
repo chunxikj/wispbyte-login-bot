@@ -1,7 +1,7 @@
 import os
 import sys
+import re
 import asyncio
-import aiohttp
 import subprocess
 import time
 from datetime import datetime
@@ -105,7 +105,7 @@ def build_report(results, start_time, end_time):
 
 def get_server_status(sb, email: str) -> str:
     """
-    尝试多种方式读取 Console 页服务器状态
+    多方式读取 Console 页服务器状态
     返回: 'online' / 'offline' / 'unknown'
     """
     # 方式1: #online-status-text
@@ -126,13 +126,12 @@ def get_server_status(sb, email: str) -> str:
             print(f"[{email}] 状态来源 #server-uptime-panel: [{text}]")
             if "offline" in text:
                 return "offline"
-            # 有时长内容说明在线
             if text and text != "offline":
                 return "online"
     except:
         pass
 
-    # 方式3: 检查 start-btn 是否可点击（disabled 说明在线）
+    # 方式3: #start-btn 是否 disabled
     try:
         btn = sb.driver.find_element("css selector", "#start-btn")
         disabled = btn.get_attribute("disabled")
@@ -189,7 +188,6 @@ def login_one(email: str, password: str) -> dict:
                 sb.type('input[type="password"]', password)
                 sb.sleep(1)
 
-                # 只用有效的 uc_gui_handle_captcha 处理 Turnstile
                 print(f"[{email}] 处理 Turnstile（uc_gui_handle_captcha）...")
                 try:
                     sb.uc_gui_handle_captcha()
@@ -199,7 +197,7 @@ def login_one(email: str, password: str) -> dict:
                     )
                     print(f"[{email}] Turnstile token 长度: {len(token) if token else 0}")
                 except Exception as e:
-                    print(f"[{email}] uc_gui_handle_captcha 失败: {e}")
+                    print(f"[{email}] uc_gui_handle_captcha 异常: {e}")
 
                 print(f"[{email}] 点击登录按钮...")
                 sb.click('button:contains("Log In")')
@@ -221,10 +219,10 @@ def login_one(email: str, password: str) -> dict:
 
             result["success"] = True
 
-            # ── 步骤2: 确保在列表页，等待渲染 ──
+            # ── 步骤2: 确保在列表页 ──
             current_url = sb.get_current_url()
-            if LOGIN_URL not in current_url:
-                print(f"[{email}] 当前不在列表页（{current_url}），跳转回列表页...")
+            if "client/servers" not in current_url or "console" in current_url:
+                print(f"[{email}] 跳转回列表页...")
                 sb.open(LOGIN_URL)
                 sb.sleep(5)
 
@@ -249,29 +247,48 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤4: 点击 Manage Server 进入 Console ──
-            print(f"[{email}] 检测到离线，寻找 Manage Server 按钮...")
-            manage_sel = None
-            for sel in ['.server-action-btn.primary', 'button:contains("Manage Server")']:
+            # ── 步骤4: 从按钮 onclick 提取服务器ID，直接跳转 Console URL ──
+            print(f"[{email}] 检测到离线，提取服务器ID...")
+            console_url = None
+
+            # 方式1: 从 .server-action-btn.primary 的 onclick 提取
+            try:
+                btn = sb.driver.find_element("css selector", ".server-action-btn.primary")
+                onclick = btn.get_attribute("onclick") or ""
+                print(f"[{email}] onclick 内容: {onclick[:100]}")
+                match = re.search(r"servers/(\w+)/console", onclick)
+                if match:
+                    server_id = match.group(1)
+                    console_url = f"https://wispbyte.com/client/servers/{server_id}/console"
+                    print(f"[{email}] 提取到服务器ID: {server_id}")
+            except Exception as e:
+                print(f"[{email}] 方式1提取失败: {e}")
+
+            # 方式2: 从页面 HTML 正则提取
+            if not console_url:
                 try:
-                    if sb.is_element_present(sel):
-                        manage_sel = sel
-                        break
-                except:
-                    pass
+                    html = sb.driver.page_source
+                    match = re.search(r"servers/([a-f0-9]{8})/console", html)
+                    if match:
+                        server_id = match.group(1)
+                        console_url = f"https://wispbyte.com/client/servers/{server_id}/console"
+                        print(f"[{email}] 方式2提取到服务器ID: {server_id}")
+                except Exception as e:
+                    print(f"[{email}] 方式2提取失败: {e}")
 
-            if not manage_sel:
-                shot = f"debug_manage_{email.replace('@','_')}.png"
+            if not console_url:
+                shot = f"debug_noid_{email.replace('@','_')}.png"
                 sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"🔍 找不到 Manage Server\nURL: {sb.get_current_url()}")
-                raise Exception("找不到 Manage Server 按钮")
+                tg_notify_photo_sync(shot, caption=f"🔍 无法提取服务器ID\nURL: {sb.get_current_url()}")
+                raise Exception("无法从页面提取服务器ID")
 
-            print(f"[{email}] 点击 Manage Server...")
-            sb.click(manage_sel)
-            sb.sleep(8)  # 等待 Console 页加载（含广告）
+            # ── 步骤5: 直接跳转 Console 页 ──
+            print(f"[{email}] 直接跳转 Console: {console_url}")
+            sb.open(console_url)
+            sb.sleep(8)
             print(f"[{email}] ✅ 已进入 Console 页，URL: {sb.get_current_url()}")
 
-            # ── 步骤5: 读取 Console 页状态（多方式，已知离线也直接点 Start）──
+            # ── 步骤6: 读取 Console 页状态 ──
             status = get_server_status(sb, email)
             print(f"[{email}] Console 页状态: [{status}]")
 
@@ -280,10 +297,10 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # status 是 offline 或 unknown，因为列表页已确认离线，直接尝试启动
+            # 离线或 unknown，列表页已确认离线，直接点 Start
             print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
 
-            # ── 步骤6: 点击 Start ──
+            # ── 步骤7: 点击 Start ──
             try:
                 start_btn = sb.driver.find_element("css selector", "#start-btn")
                 start_btn.click()
@@ -294,7 +311,7 @@ def login_one(email: str, password: str) -> dict:
                 tg_notify_photo_sync(shot, caption=f"🔍 找不到 Start 按钮\n错误: {str(e)[:100]}")
                 raise Exception(f"找不到 Start 按钮: {e}")
 
-            # ── 步骤7: 等待上线 ──
+            # ── 步骤8: 等待上线 ──
             started = wait_for_online(sb, email, max_seconds=60)
 
             if started:
