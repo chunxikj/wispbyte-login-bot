@@ -9,60 +9,75 @@ from datetime import datetime
 LOGIN_URL = "https://wispbyte.com/client/servers"
 GOST_LOCAL_PORT = 18080
 
-async def tg_notify(message: str):
-    token = os.getenv("TG_BOT_TOKEN")
-    chat_id = os.getenv("TG_CHAT_ID")
-    if not token or not chat_id:
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+
+def tg_notify_sync(message: str):
+    """同步版 TG 通知，供线程中调用"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
         print("Warning: 未设置 TG_BOT_TOKEN / TG_CHAT_ID，跳过通知")
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    async with aiohttp.ClientSession() as session:
-        try:
-            await session.post(url, data={
-                "chat_id": chat_id,
-                "text": message,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            })
-        except Exception as e:
-            print(f"Warning: Telegram 消息发送失败: {e}")
+    import urllib.request, urllib.parse
+    url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": TG_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true"
+    }).encode()
+    try:
+        urllib.request.urlopen(url, data=data, timeout=10)
+        print("✅ TG 通知发送成功")
+    except Exception as e:
+        print(f"Warning: TG 通知失败: {e}")
 
-async def tg_notify_photo(photo_path: str, caption: str = ""):
-    token = os.getenv("TG_BOT_TOKEN")
-    chat_id = os.getenv("TG_CHAT_ID")
-    if not token or not chat_id:
+def tg_notify_photo_sync(photo_path: str, caption: str = ""):
+    """同步版 TG 图片通知，供线程中调用"""
+    if not TG_BOT_TOKEN or not TG_CHAT_ID:
         return
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    async with aiohttp.ClientSession() as session:
+    import urllib.request
+    try:
+        from email.mime.multipart import MIMEMultipart
+        import mimetypes, uuid
+        boundary = uuid.uuid4().hex
+        url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto"
+        with open(photo_path, "rb") as f:
+            photo_data = f.read()
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="chat_id"\r\n\r\n'
+            f"{TG_CHAT_ID}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="caption"\r\n\r\n'
+            f"{caption}\r\n"
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="parse_mode"\r\n\r\nHTML\r\n'
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="photo"; filename="photo.png"\r\n'
+            f"Content-Type: image/png\r\n\r\n"
+        ).encode() + photo_data + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(url, data=body)
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        urllib.request.urlopen(req, timeout=15)
+    except Exception as e:
+        print(f"Warning: TG 图片通知失败: {e}")
+    finally:
         try:
-            with open(photo_path, "rb") as f:
-                data = aiohttp.FormData()
-                data.add_field("chat_id", chat_id)
-                data.add_field("photo", f, filename=os.path.basename(photo_path))
-                if caption:
-                    data.add_field("caption", caption)
-                    data.add_field("parse_mode", "HTML")
-                await session.post(url, data=data)
-        except Exception as e:
-            print(f"Warning: Telegram 图片发送失败: {e}")
-        finally:
-            try:
-                os.remove(photo_path)
-            except:
-                pass
+            os.remove(photo_path)
+        except:
+            pass
+
+async def tg_notify(message: str):
+    tg_notify_sync(message)
 
 def start_gost(socks5_proxy: str) -> subprocess.Popen:
-    cmd = [
-        "gost",
-        f"-L=http://127.0.0.1:{GOST_LOCAL_PORT}",
-        f"-F={socks5_proxy}"
-    ]
-    print(f"[gost] 启动: {' '.join(cmd)}")
+    cmd = ["gost", f"-L=http://127.0.0.1:{GOST_LOCAL_PORT}", f"-F={socks5_proxy}"]
+    print(f"[gost] 启动: gost -L=http://127.0.0.1:{GOST_LOCAL_PORT} -F=***")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     time.sleep(2)
     if proc.poll() is not None:
         raise RuntimeError(f"gost 启动失败: {proc.stderr.read().decode()}")
-    print(f"[gost] 启动成功 PID={proc.pid}，本地代理: http://127.0.0.1:{GOST_LOCAL_PORT}")
+    print(f"[gost] 启动成功 PID={proc.pid}")
     return proc
 
 def build_report(results, start_time, end_time):
@@ -96,15 +111,10 @@ def build_report(results, start_time, end_time):
     return "\n".join(lines)
 
 def login_one(email: str, password: str) -> dict:
-    """
-    使用 SeleniumBase UC模式 + Xvfb 运行，绕过 Cloudflare Turnstile
-    同步函数，在线程中调用
-    """
     from seleniumbase import SB
 
     result = {"email": email, "success": False, "server_status": None, "reason": ""}
     max_retries = 2
-
     proxy = f"http://127.0.0.1:{GOST_LOCAL_PORT}"
 
     for attempt in range(max_retries + 1):
@@ -112,39 +122,64 @@ def login_one(email: str, password: str) -> dict:
             print(f"[{email}] 尝试 {attempt + 1}: 启动 UC 模式浏览器...")
             with SB(
                 uc=True,
-                headless=False,      # UC模式必须非headless，配合Xvfb使用
-                xvfb=True,           # 自动启动虚拟显示器
-                proxy=proxy,         # 走 gost 代理
+                headless=False,
+                xvfb=True,
+                proxy=proxy,
                 incognito=True,
             ) as sb:
                 print(f"[{email}] 打开登录页...")
                 sb.open(LOGIN_URL)
                 sb.sleep(5)
 
-                # 用页面元素判断是否需要登录
                 need_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
                 print(f"[{email}] 是否需要登录: {need_login}，当前URL: {sb.get_current_url()}")
 
                 if need_login:
-                    print(f"[{email}] 填写账号密码...")
-                    sb.type('input[type="email"], input[placeholder*="Email"]', email)
-                    sb.type('input[type="password"]', password)
-
-                    print(f"[{email}] 处理 Turnstile 验证...")
-                    # SeleniumBase UC模式内置 Turnstile 处理
+                    # ── 关键：先处理 Turnstile，再填表单 ──
+                    # Turnstile 在页面加载时就出现，需要先通过它
+                    print(f"[{email}] 步骤1: 先处理 Turnstile 验证...")
                     try:
                         sb.uc_gui_click_captcha()
-                        print(f"[{email}] uc_gui_click_captcha 执行完成")
-                        sb.sleep(3)
+                        print(f"[{email}] uc_gui_click_captcha 完成，等待5秒...")
+                        sb.sleep(5)
                     except Exception as te:
-                        print(f"[{email}] uc_gui_click_captcha 失败: {te}，尝试 uc_gui_handle_captcha...")
+                        print(f"[{email}] uc_gui_click_captcha 失败: {te}")
                         try:
                             sb.uc_gui_handle_captcha()
-                            sb.sleep(3)
+                            print(f"[{email}] uc_gui_handle_captcha 完成")
+                            sb.sleep(5)
                         except Exception as te2:
                             print(f"[{email}] uc_gui_handle_captcha 也失败: {te2}")
 
-                    print(f"[{email}] 点击登录按钮...")
+                    # 检查 Turnstile 是否已通过（token 是否生成）
+                    token_val = sb.execute_script(
+                        'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
+                    )
+                    print(f"[{email}] Turnstile token 长度: {len(token_val) if token_val else 0}")
+
+                    # 步骤2: 填写表单
+                    print(f"[{email}] 步骤2: 填写账号密码...")
+                    sb.type('input[type="email"], input[placeholder*="Email"]', email)
+                    sb.sleep(0.5)
+                    sb.type('input[type="password"]', password)
+                    sb.sleep(1)
+
+                    # 步骤3: 如果 token 还没生成，再试一次 captcha
+                    if not token_val or len(token_val) < 10:
+                        print(f"[{email}] 步骤3: token未生成，再次处理 Turnstile...")
+                        try:
+                            sb.uc_gui_click_captcha()
+                            sb.sleep(5)
+                        except Exception as te3:
+                            print(f"[{email}] 第二次 captcha 处理失败: {te3}")
+
+                        token_val = sb.execute_script(
+                            'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
+                        )
+                        print(f"[{email}] 二次处理后 token 长度: {len(token_val) if token_val else 0}")
+
+                    # 步骤4: 点击登录
+                    print(f"[{email}] 步骤4: 点击登录按钮...")
                     sb.click('button:contains("Log In")')
                     sb.sleep(8)
 
@@ -155,10 +190,7 @@ def login_one(email: str, password: str) -> dict:
                     if still_login:
                         shot = f"error_login_{email.replace('@','_')}_{attempt+1}.png"
                         sb.save_screenshot(shot)
-                        import asyncio as _asyncio
-                        _asyncio.get_event_loop().run_until_complete(
-                            tg_notify_photo(shot, caption=f"❌ 第{attempt+1}次登录失败\n账号: <code>{email}</code>\nTurnstile未通过\nURL: {current_url}")
-                        )
+                        tg_notify_photo_sync(shot, caption=f"❌ 第{attempt+1}次登录失败\n账号: <code>{email}</code>\nTurnstile未通过\nURL: {current_url}")
                         raise Exception("登录失败，仍停留在登录页（Turnstile未通过）")
 
                     print(f"[{email}] ✅ 登录成功！")
@@ -179,10 +211,7 @@ def login_one(email: str, password: str) -> dict:
                 if not list_statuses:
                     shot = f"debug_list_{email.replace('@','_')}.png"
                     sb.save_screenshot(shot)
-                    import asyncio as _asyncio
-                    _asyncio.get_event_loop().run_until_complete(
-                        tg_notify_photo(shot, caption=f"🔍 列表页调试截图\n找不到状态元素\nURL: {sb.get_current_url()}")
-                    )
+                    tg_notify_photo_sync(shot, caption=f"🔍 列表页调试截图\n找不到状态元素\nURL: {sb.get_current_url()}")
                     raise Exception("找不到 .server-status-text，列表页未正确加载")
 
                 has_offline = any("offline" in s for s in list_statuses)
@@ -194,26 +223,23 @@ def login_one(email: str, password: str) -> dict:
 
                 # 有离线服务器，点击 Manage Server
                 print(f"[{email}] 检测到离线，寻找 Manage Server 按钮...")
-                manage_btn = None
+                manage_sel = None
                 for sel in ['.server-action-btn.primary', 'button:contains("Manage Server")']:
                     try:
                         if sb.is_element_present(sel):
-                            manage_btn = sel
+                            manage_sel = sel
                             break
                     except:
                         pass
 
-                if not manage_btn:
+                if not manage_sel:
                     shot = f"debug_manage_{email.replace('@','_')}.png"
                     sb.save_screenshot(shot)
-                    import asyncio as _asyncio
-                    _asyncio.get_event_loop().run_until_complete(
-                        tg_notify_photo(shot, caption=f"🔍 找不到 Manage Server\nURL: {sb.get_current_url()}")
-                    )
+                    tg_notify_photo_sync(shot, caption=f"🔍 找不到 Manage Server\nURL: {sb.get_current_url()}")
                     raise Exception("找不到 Manage Server 按钮")
 
                 print(f"[{email}] 点击 Manage Server...")
-                sb.click(manage_btn)
+                sb.click(manage_sel)
                 sb.sleep(5)
                 print(f"[{email}] ✅ 已进入 Console 页，URL: {sb.get_current_url()}")
 
@@ -250,10 +276,7 @@ def login_one(email: str, password: str) -> dict:
                     print(f"[{email}] ⚠️ 60秒内未变为 Online")
                     shot = f"warn_{email.replace('@','_')}_{int(time.time())}.png"
                     sb.save_screenshot(shot)
-                    import asyncio as _asyncio
-                    _asyncio.get_event_loop().run_until_complete(
-                        tg_notify_photo(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>")
-                    )
+                    tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>")
                     result["server_status"] = "restart_timeout"
 
                 return result
@@ -262,10 +285,7 @@ def login_one(email: str, password: str) -> dict:
             print(f"[{email}] 第 {attempt + 1} 次失败: {e}")
             result["reason"] = str(e)[:200]
             if attempt >= max_retries:
-                import asyncio as _asyncio
-                _asyncio.get_event_loop().run_until_complete(
-                    tg_notify(f"❌ Wispbyte 最终失败\n账号: <code>{email}</code>\n原因: {str(e)[:200]}")
-                )
+                tg_notify_sync(f"❌ Wispbyte 最终失败\n账号: <code>{email}</code>\n原因: {str(e)[:200]}")
 
     return result
 
@@ -277,6 +297,7 @@ async def main():
     if socks5_proxy:
         try:
             gost_proc = start_gost(socks5_proxy)
+            print("[gost] 代理已启动，出口IP将使用 SOCKS5 节点")
         except Exception as e:
             print(f"[gost] 启动失败: {e}")
     else:
@@ -284,12 +305,12 @@ async def main():
 
     accounts_str = os.getenv("LOGIN_ACCOUNTS")
     if not accounts_str:
-        await tg_notify("❌ Failed: 未配置任何账号")
+        tg_notify_sync("❌ Failed: 未配置任何账号")
         return
 
     accounts = [a.strip() for a in accounts_str.split(",") if ":" in a]
     if not accounts:
-        await tg_notify("❌ Failed: LOGIN_ACCOUNTS 格式错误，应为 email:password")
+        tg_notify_sync("❌ Failed: LOGIN_ACCOUNTS 格式错误，应为 email:password")
         return
 
     try:
@@ -297,13 +318,12 @@ async def main():
         results = []
         for acc in accounts:
             email, pwd = acc.split(":", 1)
-            # SeleniumBase 是同步的，用 executor 跑
             result = await loop.run_in_executor(None, login_one, email, pwd)
             results.append(result)
 
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         final_msg = build_report(results, start_time, end_time)
-        await tg_notify(final_msg)
+        tg_notify_sync(final_msg)
         print(final_msg)
     finally:
         if gost_proc:
