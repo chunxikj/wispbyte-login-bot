@@ -104,8 +104,7 @@ def build_report(results, start_time, end_time):
     return "\n".join(lines)
 
 def close_popups(sb, email: str):
-    """关闭页面上可能出现的弹窗，最多尝试3次"""
-    # 可能出现的关闭按钮选择器
+    """关闭页面上可能出现的弹窗"""
     close_selectors = [
         'button:contains("Maybe later")',
         'button:contains("maybe later")',
@@ -131,7 +130,38 @@ def close_popups(sb, email: str):
                 pass
         if not found:
             break
-    print(f"[{email}] 共关闭 {closed} 个弹窗")
+    if closed:
+        print(f"[{email}] 共关闭 {closed} 个弹窗")
+
+def wait_for_console_ready(sb, email: str, max_wait: int = 30) -> bool:
+    """
+    等待 Console 页 WebSocket 连接完成，状态从 Loading 变为真实状态
+    判断条件：#online-status-text 文字不再是空或 loading
+    """
+    print(f"[{email}] 等待 Console 页状态加载（最多{max_wait}秒）...")
+    for i in range(max_wait):
+        time.sleep(1)
+        try:
+            el = sb.driver.find_element("css selector", "#online-status-text")
+            text = el.text.strip().lower()
+            if text and text not in ("", "loading", "loading..."):
+                print(f"[{email}] Console 状态加载完成（第{i+1}秒）: [{text}]")
+                return True
+        except:
+            pass
+        # 同时检查 #server-uptime-panel
+        try:
+            el = sb.driver.find_element("css selector", "#server-uptime-panel")
+            text = el.text.strip().lower()
+            if text and text not in ("", "loading", "loading..."):
+                print(f"[{email}] uptime-panel 加载完成（第{i+1}秒）: [{text}]")
+                return True
+        except:
+            pass
+        if (i + 1) % 5 == 0:
+            print(f"[{email}] 已等待 {i+1} 秒...")
+    print(f"[{email}] 等待超时，状态仍未加载")
+    return False
 
 def get_server_status(sb, email: str) -> str:
     """多方式读取 Console 页服务器状态，返回 online/offline/unknown"""
@@ -139,7 +169,7 @@ def get_server_status(sb, email: str) -> str:
     try:
         el = sb.driver.find_element("css selector", "#online-status-text")
         text = el.text.strip().lower()
-        if text:
+        if text and text not in ("loading", "loading..."):
             print(f"[{email}] 状态来源 #online-status-text: [{text}]")
             return text
     except:
@@ -149,7 +179,7 @@ def get_server_status(sb, email: str) -> str:
     try:
         el = sb.driver.find_element("css selector", "#server-uptime-panel")
         text = el.text.strip().lower()
-        if text:
+        if text and text not in ("loading", "loading..."):
             print(f"[{email}] 状态来源 #server-uptime-panel: [{text}]")
             if "offline" in text:
                 return "offline"
@@ -249,23 +279,25 @@ def login_one(email: str, password: str) -> dict:
             # ── 步骤2: 直接跳转 Console 页 ──
             print(f"[{email}] 跳转 Console 页: {CONSOLE_URL}")
             sb.open(CONSOLE_URL)
-            sb.sleep(8)
+            sb.sleep(5)
             print(f"[{email}] 当前URL: {sb.get_current_url()}")
 
-            # ── 步骤3: 关闭弹窗（最多两轮）──
+            # ── 步骤3: 关闭弹窗 ──
             print(f"[{email}] 检查并关闭弹窗...")
             close_popups(sb, email)
-            time.sleep(2)
-            # 再关一轮，防止有多个弹窗
+            time.sleep(1)
             close_popups(sb, email)
             time.sleep(1)
 
-            # 截图确认弹窗已关闭
+            # ── 步骤4: 等待 Console 页状态加载完成（WebSocket就绪）──
+            ready = wait_for_console_ready(sb, email, max_wait=30)
+
+            # 截图确认当前页面状态
             shot = f"console_{email.replace('@','_')}.png"
             sb.save_screenshot(shot)
-            tg_notify_photo_sync(shot, caption=f"📋 Console 页截图（弹窗处理后）\n账号: <code>{email}</code>")
+            tg_notify_photo_sync(shot, caption=f"📋 Console 页截图\n状态加载: {'完成' if ready else '超时'}\n账号: <code>{email}</code>")
 
-            # ── 步骤4: 读取服务器状态 ──
+            # ── 步骤5: 读取服务器状态 ──
             status = get_server_status(sb, email)
             print(f"[{email}] Console 页状态: [{status}]")
 
@@ -274,7 +306,7 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤5: 离线则点击 Start ──
+            # ── 步骤6: 离线则点击 Start ──
             print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
             try:
                 start_btn = sb.driver.find_element("css selector", "#start-btn")
@@ -286,7 +318,7 @@ def login_one(email: str, password: str) -> dict:
                 tg_notify_photo_sync(shot, caption=f"🔍 找不到 Start 按钮\n错误: {str(e)[:100]}")
                 raise Exception(f"找不到 Start 按钮: {e}")
 
-            # ── 步骤6: 等待上线 ──
+            # ── 步骤7: 等待上线 ──
             started = wait_for_online(sb, email, max_seconds=60)
 
             if started:
