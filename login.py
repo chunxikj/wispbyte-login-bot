@@ -172,78 +172,101 @@ def js_click_start(sb, email: str) -> bool:
         return False
 
 def check_verify_popup(sb, email: str) -> bool:
-    """检查是否出现了 Verify before starting 弹窗"""
+    """用精确选择器检测 wisp-start-captcha-modal 弹窗"""
     try:
         has_popup = sb.execute_script(
-            "(function(){ var els=document.querySelectorAll('*'); for(var i=0;i<els.length;i++){ if(els[i].textContent && els[i].textContent.includes('Verify before starting')) return true; } return false; })()"
+            "(function(){ return document.querySelector('.wisp-start-captcha-modal') !== null; })()"
         )
         result = bool(has_popup)
         if result:
-            print(f"[{email}] 检测到 Verify before starting 弹窗")
+            print(f"[{email}] 检测到 .wisp-start-captcha-modal 弹窗")
         return result
     except:
         return False
 
-def wait_for_captcha_load(sb, email: str, max_wait: int = 15) -> bool:
+def wait_for_turnstile_in_popup(sb, email: str, max_wait: int = 35) -> bool:
     """
-    等待弹窗内 CAPTCHA 加载完成
-    判断条件：iframe 出现，或者弹窗内容不再是空
+    等待弹窗内 Turnstile 加载完成
+    判断：wisp-start-captcha-widget 内的 iframe 出现
+    最多等35秒（实测需要20-30秒）
     """
-    print(f"[{email}] 等待弹窗内 CAPTCHA 加载（最多{max_wait}秒）...")
+    print(f"[{email}] 等待弹窗内 Turnstile 加载（最多{max_wait}秒）...")
     for i in range(max_wait):
         time.sleep(1)
         try:
-            # 检查是否有 CF iframe 出现
             has_iframe = sb.execute_script(
-                "(function(){ var frames=document.querySelectorAll('iframe'); for(var i=0;i<frames.length;i++){ var src=frames[i].src||''; if(src.indexOf('cloudflare')>-1||src.indexOf('turnstile')>-1||src.indexOf('challenge')>-1) return true; } return false; })()"
+                "(function(){ "
+                "var widget=document.querySelector('.wisp-start-captcha-widget');"
+                "if(!widget) return false;"
+                "var iframes=widget.querySelectorAll('iframe');"
+                "return iframes.length > 0;"
+                "})()"
             )
             if has_iframe:
-                print(f"[{email}] CAPTCHA iframe 已出现（第{i+1}秒）")
-                time.sleep(2)  # 再等2秒让内容渲染
+                print(f"[{email}] ✅ Turnstile iframe 已出现（第{i+1}秒）")
+                time.sleep(2)
                 return True
         except:
             pass
-    print(f"[{email}] CAPTCHA iframe 未出现，可能加载失败")
+        if (i + 1) % 5 == 0:
+            print(f"[{email}] 已等待 {i+1} 秒...")
+    print(f"[{email}] Turnstile iframe 未出现，继续尝试...")
+    return False
+
+def js_cancel_verify_popup(sb, email: str):
+    """点击弹窗内 Cancel 按钮"""
+    try:
+        cancelled = sb.execute_script(
+            "(function(){ "
+            "var modal=document.querySelector('.wisp-start-captcha-modal');"
+            "if(!modal) return false;"
+            "var btns=modal.querySelectorAll('button');"
+            "for(var i=0;i<btns.length;i++){"
+            "  if(btns[i].textContent.trim()==='Cancel'){ btns[i].click(); return true; }"
+            "}"
+            "return false;"
+            "})()"
+        )
+        if cancelled:
+            print(f"[{email}] ✅ Cancel 已点击")
+            time.sleep(2)
+            return True
+    except Exception as e:
+        print(f"[{email}] 点击 Cancel 失败: {e}")
     return False
 
 def handle_verify_popup(sb, email: str) -> bool:
     """
-    处理 Verify before starting 弹窗
-    等待 CAPTCHA 加载后尝试自动通过，失败则点 Cancel
+    处理 Verify before starting 弹窗：
+    1. 等待 Turnstile 加载（最多35秒）
+    2. 截图发 TG
+    3. 尝试 uc_gui_handle_captcha
+    4. 失败则点 Cancel
+    返回 True=验证通过，False=已取消
     """
-    # 等待 CAPTCHA 加载
-    wait_for_captcha_load(sb, email, max_wait=15)
+    # 等待 Turnstile 加载
+    wait_for_turnstile_in_popup(sb, email, max_wait=35)
 
-    # 截图看弹窗状态
-    shot = f"verify_popup_{email.replace('@','_')}_{int(time.time())}.png"
+    # 截图
+    shot = f"verify_{email.replace('@','_')}_{int(time.time())}.png"
     sb.save_screenshot(shot)
-    tg_notify_photo_sync(shot, caption=f"🔐 Verify 弹窗截图\n账号: <code>{email}</code>")
+    tg_notify_photo_sync(shot, caption=f"🔐 Verify 弹窗\n账号: <code>{email}</code>")
 
-    # 尝试自动处理 CAPTCHA
-    print(f"[{email}] 尝试自动处理弹窗内 CAPTCHA...")
+    # 尝试自动通过
+    print(f"[{email}] 尝试 uc_gui_handle_captcha 处理弹窗内 Turnstile...")
     try:
         sb.uc_gui_handle_captcha()
         time.sleep(5)
         still_popup = check_verify_popup(sb, email)
         if not still_popup:
-            print(f"[{email}] ✅ 弹窗验证通过，弹窗已消失")
+            print(f"[{email}] ✅ 弹窗已消失，验证通过！")
             return True
-        print(f"[{email}] 弹窗仍存在，CAPTCHA 未通过")
+        print(f"[{email}] 弹窗仍存在，验证未通过")
     except Exception as e:
-        print(f"[{email}] 自动处理 CAPTCHA 失败: {e}")
+        print(f"[{email}] uc_gui_handle_captcha 失败: {e}")
 
     # 点击 Cancel
-    print(f"[{email}] 点击 Cancel 关闭弹窗...")
-    try:
-        cancelled = sb.execute_script(
-            "(function(){ var btns=document.querySelectorAll('button'); for(var i=0;i<btns.length;i++){ if(btns[i].textContent.trim()==='Cancel'){ btns[i].click(); return true; } } return false; })()"
-        )
-        if cancelled:
-            print(f"[{email}] Cancel 已点击")
-            time.sleep(2)
-    except Exception as e:
-        print(f"[{email}] 点击 Cancel 失败: {e}")
-
+    js_cancel_verify_popup(sb, email)
     return False
 
 def wait_for_online_js(sb, email: str, max_seconds: int = 60) -> bool:
@@ -260,7 +283,7 @@ def wait_for_online_js(sb, email: str, max_seconds: int = 60) -> bool:
 def start_server_with_verify(sb, email: str, max_retries: int = 3) -> bool:
     """
     点击 Start，处理 Verify before starting 弹窗
-    点击 Start 后等待10秒让弹窗有足够时间出现和加载
+    点击后等待35秒让弹窗有足够时间出现和加载
     """
     for attempt in range(max_retries):
         print(f"[{email}] 点击 Start（第{attempt+1}次）...")
@@ -269,36 +292,33 @@ def start_server_with_verify(sb, email: str, max_retries: int = 3) -> bool:
             print(f"[{email}] 找不到 Start 按钮")
             return False
 
-        # 等待10秒，给弹窗足够时间出现和加载
-        print(f"[{email}] 等待10秒，检查是否出现验证弹窗...")
-        time.sleep(10)
+        # 等待35秒，给弹窗足够时间出现和加载（实测需要20-30秒）
+        print(f"[{email}] 等待35秒，检查是否出现验证弹窗...")
+        time.sleep(35)
 
         has_popup = check_verify_popup(sb, email)
 
         if not has_popup:
-            # 没有弹窗，检查是否已经在启动中
+            # 没有弹窗，检查状态
             status = js_get_status(sb, email)
             print(f"[{email}] 无弹窗，当前状态: {status}")
             if status == 'online':
                 return True
-            if status in ('starting', 'loading'):
-                print(f"[{email}] 服务器启动中，等待上线...")
-                return wait_for_online_js(sb, email, max_seconds=60)
-            # 状态仍是 offline，等待上线（有可能正在启动）
+            # 可能正在启动中，继续等待
             print(f"[{email}] 等待服务器启动...")
             return wait_for_online_js(sb, email, max_seconds=60)
 
-        # 有弹窗，处理它
+        # 有弹窗，处理
         verified = handle_verify_popup(sb, email)
         if verified:
             print(f"[{email}] 验证通过，等待服务器启动...")
             return wait_for_online_js(sb, email, max_seconds=60)
 
-        # 取消了弹窗，重试
+        # 取消了，重试
         print(f"[{email}] 已取消弹窗，准备第{attempt+2}次点击 Start...")
         time.sleep(3)
 
-    print(f"[{email}] 已重试 {max_retries} 次，仍未成功启动")
+    print(f"[{email}] 已重试 {max_retries} 次，仍未成功")
     return False
 
 def login_one(email: str, password: str) -> dict:
@@ -351,13 +371,13 @@ def login_one(email: str, password: str) -> dict:
                     time.sleep(1)
                     still_form = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
                     if not still_form:
-                        print(f"[{email}] ✅ 登录表单消失（第{i+1}秒），登录成功！")
+                        print(f"[{email}] ✅ 登录成功（第{i+1}秒）")
                         break
                 else:
                     shot = f"error_login_{email.replace('@','_')}.png"
                     sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"❌ 登录失败\n账号: <code>{email}</code>\nURL: {sb.get_current_url()}")
-                    raise Exception("登录失败，15秒内表单未消失（Turnstile未通过）")
+                    tg_notify_photo_sync(shot, caption=f"❌ 登录失败\n账号: <code>{email}</code>")
+                    raise Exception("登录失败，15秒内表单未消失")
 
                 print(f"[{email}] 登录后URL: {sb.get_current_url()}")
             else:
