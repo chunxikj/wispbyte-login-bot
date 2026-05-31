@@ -131,9 +131,7 @@ def close_popups(sb, email: str):
         print(f"[{email}] 共关闭 {closed} 个弹窗")
 
 def js_get_status(sb, email: str) -> str:
-    """用立即执行函数包裹，修复 Illegal return statement"""
     try:
-        # 用 (function(){...})() 包裹避免 Illegal return statement
         status_text = sb.execute_script(
             "(function(){ var el=document.getElementById('online-status-text'); return el ? el.textContent.trim().toLowerCase() : ''; })()"
         )
@@ -151,7 +149,6 @@ def js_get_status(sb, email: str) -> str:
         disabled = sb.execute_script(
             "(function(){ var btn=document.getElementById('start-btn'); if(!btn) return null; return btn.disabled; })()"
         )
-        print(f"[{email}] start-btn disabled: [{disabled}]")
         if disabled is not None:
             return 'online' if disabled else 'offline'
 
@@ -161,7 +158,6 @@ def js_get_status(sb, email: str) -> str:
     return 'unknown'
 
 def js_click_start(sb, email: str) -> bool:
-    """用立即执行函数点击 Start 按钮"""
     try:
         result = sb.execute_script(
             "(function(){ var btn=document.getElementById('start-btn'); if(btn){ btn.click(); return true; } return false; })()"
@@ -174,6 +170,90 @@ def js_click_start(sb, email: str) -> bool:
     except Exception as e:
         print(f"[{email}] JS 点击 Start 失败: {e}")
         return False
+
+def check_verify_popup(sb, email: str) -> bool:
+    """检查是否出现了 Verify before starting 弹窗"""
+    try:
+        has_popup = sb.execute_script(
+            "(function(){ var els=document.querySelectorAll('*'); for(var i=0;i<els.length;i++){ if(els[i].textContent && els[i].textContent.includes('Verify before starting')) return true; } return false; })()"
+        )
+        return bool(has_popup)
+    except:
+        return False
+
+def handle_verify_popup(sb, email: str) -> bool:
+    """
+    处理 Verify before starting 弹窗
+    策略：先尝试 uc_gui_handle_captcha，失败则点 Cancel
+    返回是否成功处理（True=通过验证，False=取消了）
+    """
+    print(f"[{email}] 检测到 Verify before starting 弹窗")
+
+    # 先尝试自动通过验证
+    try:
+        print(f"[{email}] 尝试自动处理弹窗内 CAPTCHA...")
+        sb.uc_gui_handle_captcha()
+        time.sleep(5)
+
+        # 检查弹窗是否消失（说明验证通过）
+        still_popup = check_verify_popup(sb, email)
+        if not still_popup:
+            print(f"[{email}] ✅ 弹窗验证通过，弹窗已消失")
+            return True
+        print(f"[{email}] 弹窗仍存在，CAPTCHA 未通过")
+    except Exception as e:
+        print(f"[{email}] 自动处理 CAPTCHA 失败: {e}")
+
+    # 点击 Cancel 关闭弹窗
+    print(f"[{email}] 点击 Cancel 关闭弹窗...")
+    try:
+        cancelled = sb.execute_script(
+            "(function(){ var btns=document.querySelectorAll('button'); for(var i=0;i<btns.length;i++){ if(btns[i].textContent.trim()==='Cancel'){ btns[i].click(); return true; } } return false; })()"
+        )
+        if cancelled:
+            print(f"[{email}] Cancel 已点击")
+            time.sleep(2)
+            return False
+    except Exception as e:
+        print(f"[{email}] 点击 Cancel 失败: {e}")
+
+    return False
+
+def start_server_with_verify(sb, email: str, max_retries: int = 3) -> bool:
+    """
+    点击 Start，处理可能出现的 Verify before starting 弹窗
+    最多重试 max_retries 次
+    返回是否成功启动
+    """
+    for attempt in range(max_retries):
+        print(f"[{email}] 点击 Start（第{attempt+1}次）...")
+        clicked = js_click_start(sb, email)
+        if not clicked:
+            print(f"[{email}] 找不到 Start 按钮")
+            return False
+
+        # 等待几秒，检查是否出现验证弹窗
+        time.sleep(5)
+        has_popup = check_verify_popup(sb, email)
+
+        if not has_popup:
+            # 没有弹窗，Start 已触发，等待上线
+            print(f"[{email}] 未出现验证弹窗，等待服务器启动...")
+            return wait_for_online_js(sb, email, max_seconds=60)
+
+        # 有弹窗，处理它
+        verified = handle_verify_popup(sb, email)
+        if verified:
+            # 验证通过，等待上线
+            print(f"[{email}] 验证通过，等待服务器启动...")
+            return wait_for_online_js(sb, email, max_seconds=60)
+
+        # 取消了弹窗，下一轮重试点 Start
+        print(f"[{email}] 已取消弹窗，准备第{attempt+2}次点击 Start...")
+        time.sleep(3)
+
+    print(f"[{email}] 已重试 {max_retries} 次，仍未成功启动")
+    return False
 
 def wait_for_online_js(sb, email: str, max_seconds: int = 60) -> bool:
     for i in range(max_seconds):
@@ -256,24 +336,22 @@ def login_one(email: str, password: str) -> dict:
             current_url = sb.get_current_url()
             print(f"[{email}] 当前URL: {current_url}")
 
-            # 检查是否跳转失败（chrome-error 说明代理连接超时）
-            if "chrome-error" in current_url or "error" in current_url.lower():
-                print(f"[{email}] 页面加载失败，重试一次...")
+            if "chrome-error" in current_url:
+                print(f"[{email}] 页面加载失败，重试...")
                 sb.sleep(3)
                 sb.open(CONSOLE_URL)
                 sb.sleep(8)
                 current_url = sb.get_current_url()
-                print(f"[{email}] 重试后URL: {current_url}")
                 if "chrome-error" in current_url:
-                    raise Exception(f"Console 页无法访问（代理超时），URL: {current_url}")
+                    raise Exception(f"Console 页无法访问，URL: {current_url}")
 
-            # ── 步骤3: 关闭弹窗 ──
+            # ── 步骤3: 关闭广告弹窗 ──
             print(f"[{email}] 检查并关闭弹窗...")
             close_popups(sb, email)
             time.sleep(1)
             close_popups(sb, email)
 
-            # ── 步骤4: 等待页面状态更新 ──
+            # ── 步骤4: 等待状态更新 ──
             print(f"[{email}] 等待页面状态更新（15秒）...")
             sb.sleep(15)
 
@@ -291,27 +369,18 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤6: 点击 Start ──
-            print(f"[{email}] 服务器离线（状态:{status}），点击 Start...")
-            clicked = js_click_start(sb, email)
-            if not clicked:
-                shot = f"debug_start_{email.replace('@','_')}.png"
-                sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"🔍 Start 按钮点击失败\n账号: <code>{email}</code>")
-                raise Exception("JS 无法找到或点击 Start 按钮")
-
-            # ── 步骤7: 等待上线 ──
-            print(f"[{email}] 等待服务器启动（最多60秒）...")
-            started = wait_for_online_js(sb, email, max_seconds=60)
+            # ── 步骤6: 启动服务器（含验证弹窗处理）──
+            print(f"[{email}] 服务器离线（状态:{status}），开始启动流程...")
+            started = start_server_with_verify(sb, email, max_retries=3)
 
             if started:
                 print(f"[{email}] ✅ 服务器已成功启动！")
                 result["server_status"] = "restarted"
             else:
-                print(f"[{email}] ⚠️ 60秒内未变为 Online")
+                print(f"[{email}] ⚠️ 启动失败或超时")
                 shot = f"warn_{email.replace('@','_')}_{int(time.time())}.png"
                 sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>")
+                tg_notify_photo_sync(shot, caption=f"⚠️ 启动失败或超时\n账号: <code>{email}</code>")
                 result["server_status"] = "restart_timeout"
 
             return result
