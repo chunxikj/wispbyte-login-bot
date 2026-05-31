@@ -104,7 +104,6 @@ def build_report(results, start_time, end_time):
     return "\n".join(lines)
 
 def close_popups(sb, email: str):
-    """关闭页面上可能出现的弹窗"""
     close_selectors = [
         'button:contains("Maybe later")',
         'button:contains("maybe later")',
@@ -131,73 +130,55 @@ def close_popups(sb, email: str):
     if closed:
         print(f"[{email}] 共关闭 {closed} 个弹窗")
 
-def get_server_status_js(sb, email: str) -> str:
-    """
-    用 JavaScript 直接读取状态，避免 WebDriver 协议超时断连
-    返回 online / offline / unknown
-    """
+def js_get_status(sb, email: str) -> str:
+    """用立即执行函数包裹，修复 Illegal return statement"""
     try:
-        result = sb.execute_script("""
-            var status1 = document.getElementById('online-status-text');
-            var status2 = document.getElementById('server-uptime-panel');
-            var startBtn = document.getElementById('start-btn');
-            return {
-                statusText: status1 ? status1.textContent.trim().toLowerCase() : '',
-                uptimeText: status2 ? status2.textContent.trim().toLowerCase() : '',
-                startBtnDisabled: startBtn ? startBtn.disabled : null,
-                startBtnExists: startBtn !== null
-            };
-        """)
-        print(f"[{email}] JS读取结果: {result}")
+        # 用 (function(){...})() 包裹避免 Illegal return statement
+        status_text = sb.execute_script(
+            "(function(){ var el=document.getElementById('online-status-text'); return el ? el.textContent.trim().toLowerCase() : ''; })()"
+        )
+        print(f"[{email}] online-status-text: [{status_text}]")
+        if status_text and status_text not in ('', 'loading', 'loading...'):
+            return status_text
 
-        # 优先用 statusText
-        if result.get('statusText') and result['statusText'] not in ('', 'loading', 'loading...'):
-            return result['statusText']  # 'online' 或 'offline'
+        uptime_text = sb.execute_script(
+            "(function(){ var el=document.getElementById('server-uptime-panel'); return el ? el.textContent.trim().toLowerCase() : ''; })()"
+        )
+        print(f"[{email}] server-uptime-panel: [{uptime_text}]")
+        if uptime_text and uptime_text not in ('', 'loading', 'loading...'):
+            return 'offline' if 'offline' in uptime_text else 'online'
 
-        # 其次用 uptimeText
-        if result.get('uptimeText') and result['uptimeText'] not in ('', 'loading', 'loading...'):
-            if 'offline' in result['uptimeText']:
-                return 'offline'
-            return 'online'
-
-        # 最后用 start-btn disabled 状态
-        if result.get('startBtnExists'):
-            if result.get('startBtnDisabled'):
-                return 'online'
-            else:
-                return 'offline'
+        disabled = sb.execute_script(
+            "(function(){ var btn=document.getElementById('start-btn'); if(!btn) return null; return btn.disabled; })()"
+        )
+        print(f"[{email}] start-btn disabled: [{disabled}]")
+        if disabled is not None:
+            return 'online' if disabled else 'offline'
 
     except Exception as e:
         print(f"[{email}] JS读取状态失败: {e}")
 
     return 'unknown'
 
-def click_start_btn_js(sb, email: str) -> bool:
-    """用 JavaScript 直接点击 Start 按钮，避免 WebDriver find_element 超时"""
+def js_click_start(sb, email: str) -> bool:
+    """用立即执行函数点击 Start 按钮"""
     try:
-        result = sb.execute_script("""
-            var btn = document.getElementById('start-btn');
-            if (btn) {
-                btn.click();
-                return true;
-            }
-            return false;
-        """)
+        result = sb.execute_script(
+            "(function(){ var btn=document.getElementById('start-btn'); if(btn){ btn.click(); return true; } return false; })()"
+        )
         if result:
-            print(f"[{email}] ✅ JS 点击 Start 按钮成功")
+            print(f"[{email}] ✅ JS 点击 Start 成功")
             return True
-        else:
-            print(f"[{email}] ❌ JS 未找到 Start 按钮")
-            return False
+        print(f"[{email}] ❌ JS 未找到 Start 按钮")
+        return False
     except Exception as e:
         print(f"[{email}] JS 点击 Start 失败: {e}")
         return False
 
 def wait_for_online_js(sb, email: str, max_seconds: int = 60) -> bool:
-    """用 JavaScript 轮询等待服务器变为 online"""
     for i in range(max_seconds):
         time.sleep(1)
-        status = get_server_status_js(sb, email)
+        status = js_get_status(sb, email)
         if status == 'online':
             print(f"[{email}] ✅ 服务器已上线（第{i+1}秒）")
             return True
@@ -221,7 +202,7 @@ def login_one(email: str, password: str) -> dict:
             incognito=True,
         ) as sb:
 
-            # ── 步骤1: 打开登录页 ──
+            # ── 步骤1: 登录 ──
             print(f"[{email}] 打开登录页...")
             sb.open(LOGIN_URL)
             sb.sleep(5)
@@ -241,7 +222,7 @@ def login_one(email: str, password: str) -> dict:
                     sb.uc_gui_handle_captcha()
                     sb.sleep(3)
                     token = sb.execute_script(
-                        'return document.querySelector(\'input[name="cf-turnstile-response"]\')?.value || ""'
+                        "(function(){ var el=document.querySelector('input[name=\"cf-turnstile-response\"]'); return el ? el.value : ''; })()"
                     )
                     print(f"[{email}] Turnstile token 长度: {len(token) if token else 0}")
                 except Exception as e:
@@ -267,11 +248,24 @@ def login_one(email: str, password: str) -> dict:
 
             result["success"] = True
 
-            # ── 步骤2: 直接跳转 Console 页 ──
+            # ── 步骤2: 跳转 Console 页 ──
             print(f"[{email}] 跳转 Console 页: {CONSOLE_URL}")
             sb.open(CONSOLE_URL)
             sb.sleep(5)
-            print(f"[{email}] 当前URL: {sb.get_current_url()}")
+
+            current_url = sb.get_current_url()
+            print(f"[{email}] 当前URL: {current_url}")
+
+            # 检查是否跳转失败（chrome-error 说明代理连接超时）
+            if "chrome-error" in current_url or "error" in current_url.lower():
+                print(f"[{email}] 页面加载失败，重试一次...")
+                sb.sleep(3)
+                sb.open(CONSOLE_URL)
+                sb.sleep(8)
+                current_url = sb.get_current_url()
+                print(f"[{email}] 重试后URL: {current_url}")
+                if "chrome-error" in current_url:
+                    raise Exception(f"Console 页无法访问（代理超时），URL: {current_url}")
 
             # ── 步骤3: 关闭弹窗 ──
             print(f"[{email}] 检查并关闭弹窗...")
@@ -279,17 +273,17 @@ def login_one(email: str, password: str) -> dict:
             time.sleep(1)
             close_popups(sb, email)
 
-            # ── 步骤4: 固定等待15秒让 WebSocket 连接并更新状态 ──
+            # ── 步骤4: 等待页面状态更新 ──
             print(f"[{email}] 等待页面状态更新（15秒）...")
             sb.sleep(15)
 
-            # 截图确认页面状态
+            # 截图
             shot = f"console_{email.replace('@','_')}.png"
             sb.save_screenshot(shot)
             tg_notify_photo_sync(shot, caption=f"📋 Console 页截图\n账号: <code>{email}</code>")
 
-            # ── 步骤5: 用 JS 读取服务器状态 ──
-            status = get_server_status_js(sb, email)
+            # ── 步骤5: 读取状态 ──
+            status = js_get_status(sb, email)
             print(f"[{email}] Console 页状态: [{status}]")
 
             if status == 'online':
@@ -297,18 +291,17 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤6: 离线则用 JS 点击 Start ──
-            print(f"[{email}] 服务器离线（状态:{status}），点击 Start 按钮...")
-            clicked = click_start_btn_js(sb, email)
+            # ── 步骤6: 点击 Start ──
+            print(f"[{email}] 服务器离线（状态:{status}），点击 Start...")
+            clicked = js_click_start(sb, email)
             if not clicked:
                 shot = f"debug_start_{email.replace('@','_')}.png"
                 sb.save_screenshot(shot)
                 tg_notify_photo_sync(shot, caption=f"🔍 Start 按钮点击失败\n账号: <code>{email}</code>")
-                raise Exception("JS 无法点击 Start 按钮")
+                raise Exception("JS 无法找到或点击 Start 按钮")
 
+            # ── 步骤7: 等待上线 ──
             print(f"[{email}] 等待服务器启动（最多60秒）...")
-
-            # ── 步骤7: 用 JS 轮询等待上线 ──
             started = wait_for_online_js(sb, email, max_seconds=60)
 
             if started:
@@ -318,7 +311,7 @@ def login_one(email: str, password: str) -> dict:
                 print(f"[{email}] ⚠️ 60秒内未变为 Online")
                 shot = f"warn_{email.replace('@','_')}_{int(time.time())}.png"
                 sb.save_screenshot(shot)
-                tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>\n已点击 Start 但60秒内未上线")
+                tg_notify_photo_sync(shot, caption=f"⚠️ 启动超时\n账号: <code>{email}</code>")
                 result["server_status"] = "restart_timeout"
 
             return result
