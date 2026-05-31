@@ -172,7 +172,6 @@ def js_click_start(sb, email: str) -> bool:
         return False
 
 def check_verify_popup(sb, email: str) -> bool:
-    """检查是否出现了 Verify before starting 弹窗"""
     try:
         has_popup = sb.execute_script(
             "(function(){ var els=document.querySelectorAll('*'); for(var i=0;i<els.length;i++){ if(els[i].textContent && els[i].textContent.includes('Verify before starting')) return true; } return false; })()"
@@ -182,29 +181,19 @@ def check_verify_popup(sb, email: str) -> bool:
         return False
 
 def handle_verify_popup(sb, email: str) -> bool:
-    """
-    处理 Verify before starting 弹窗
-    策略：先尝试 uc_gui_handle_captcha，失败则点 Cancel
-    返回是否成功处理（True=通过验证，False=取消了）
-    """
     print(f"[{email}] 检测到 Verify before starting 弹窗")
-
-    # 先尝试自动通过验证
     try:
         print(f"[{email}] 尝试自动处理弹窗内 CAPTCHA...")
         sb.uc_gui_handle_captcha()
         time.sleep(5)
-
-        # 检查弹窗是否消失（说明验证通过）
         still_popup = check_verify_popup(sb, email)
         if not still_popup:
-            print(f"[{email}] ✅ 弹窗验证通过，弹窗已消失")
+            print(f"[{email}] ✅ 弹窗验证通过")
             return True
         print(f"[{email}] 弹窗仍存在，CAPTCHA 未通过")
     except Exception as e:
         print(f"[{email}] 自动处理 CAPTCHA 失败: {e}")
 
-    # 点击 Cancel 关闭弹窗
     print(f"[{email}] 点击 Cancel 关闭弹窗...")
     try:
         cancelled = sb.execute_script(
@@ -213,18 +202,12 @@ def handle_verify_popup(sb, email: str) -> bool:
         if cancelled:
             print(f"[{email}] Cancel 已点击")
             time.sleep(2)
-            return False
     except Exception as e:
         print(f"[{email}] 点击 Cancel 失败: {e}")
 
     return False
 
 def start_server_with_verify(sb, email: str, max_retries: int = 3) -> bool:
-    """
-    点击 Start，处理可能出现的 Verify before starting 弹窗
-    最多重试 max_retries 次
-    返回是否成功启动
-    """
     for attempt in range(max_retries):
         print(f"[{email}] 点击 Start（第{attempt+1}次）...")
         clicked = js_click_start(sb, email)
@@ -232,23 +215,18 @@ def start_server_with_verify(sb, email: str, max_retries: int = 3) -> bool:
             print(f"[{email}] 找不到 Start 按钮")
             return False
 
-        # 等待几秒，检查是否出现验证弹窗
         time.sleep(5)
         has_popup = check_verify_popup(sb, email)
 
         if not has_popup:
-            # 没有弹窗，Start 已触发，等待上线
             print(f"[{email}] 未出现验证弹窗，等待服务器启动...")
             return wait_for_online_js(sb, email, max_seconds=60)
 
-        # 有弹窗，处理它
         verified = handle_verify_popup(sb, email)
         if verified:
-            # 验证通过，等待上线
             print(f"[{email}] 验证通过，等待服务器启动...")
             return wait_for_online_js(sb, email, max_seconds=60)
 
-        # 取消了弹窗，下一轮重试点 Start
         print(f"[{email}] 已取消弹窗，准备第{attempt+2}次点击 Start...")
         time.sleep(3)
 
@@ -310,19 +288,24 @@ def login_one(email: str, password: str) -> dict:
 
                 print(f"[{email}] 点击登录按钮...")
                 sb.click('button:contains("Log In")')
-                sb.sleep(8)
 
-                current_url = sb.get_current_url()
-                print(f"[{email}] 登录后URL: {current_url}")
-
-                still_login = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
-                if still_login:
+                # ── 关键修复：等待登录完成，最多等15秒 ──
+                # 不用URL判断，改为等待登录表单消失
+                print(f"[{email}] 等待登录完成（最多15秒）...")
+                for i in range(15):
+                    time.sleep(1)
+                    still_form = sb.is_element_present('input[type="email"], input[placeholder*="Email"]')
+                    if not still_form:
+                        print(f"[{email}] ✅ 登录表单消失（第{i+1}秒），登录成功！")
+                        break
+                else:
+                    # 15秒后仍有表单，截图报错
                     shot = f"error_login_{email.replace('@','_')}.png"
                     sb.save_screenshot(shot)
-                    tg_notify_photo_sync(shot, caption=f"❌ 登录失败\n账号: <code>{email}</code>\nURL: {current_url}")
-                    raise Exception("登录失败，仍停留在登录页（Turnstile未通过）")
+                    tg_notify_photo_sync(shot, caption=f"❌ 登录失败\n账号: <code>{email}</code>\nURL: {sb.get_current_url()}")
+                    raise Exception("登录失败，15秒内表单未消失（Turnstile未通过）")
 
-                print(f"[{email}] ✅ 登录成功！")
+                print(f"[{email}] 登录后URL: {sb.get_current_url()}")
             else:
                 print(f"[{email}] ✅ 已有登录态")
 
@@ -355,7 +338,6 @@ def login_one(email: str, password: str) -> dict:
             print(f"[{email}] 等待页面状态更新（15秒）...")
             sb.sleep(15)
 
-            # 截图
             shot = f"console_{email.replace('@','_')}.png"
             sb.save_screenshot(shot)
             tg_notify_photo_sync(shot, caption=f"📋 Console 页截图\n账号: <code>{email}</code>")
@@ -369,7 +351,7 @@ def login_one(email: str, password: str) -> dict:
                 result["server_status"] = "already_online"
                 return result
 
-            # ── 步骤6: 启动服务器（含验证弹窗处理）──
+            # ── 步骤6: 启动服务器 ──
             print(f"[{email}] 服务器离线（状态:{status}），开始启动流程...")
             started = start_server_with_verify(sb, email, max_retries=3)
 
