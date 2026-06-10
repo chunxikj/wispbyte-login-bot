@@ -1,15 +1,14 @@
 name: Wispbyte Auto Login
-
 on:
   schedule:
-    - cron: '31 21 */3 * *'    # 每3天UTC 21点31分
+    - cron: '31 21 */3 * *'
   workflow_dispatch:
 
 jobs:
   login:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    
+    timeout-minutes: 30
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -19,8 +18,36 @@ jobs:
         with:
           to: ${{ secrets.TG_CHAT_ID }}
           token: ${{ secrets.TG_BOT_TOKEN }}
-          message: "*Wispbyte 任务已启动！*\n预计 8–12 分钟完成\n查看: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          message: "*Wispbyte 任务已启动！*\n查看: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           format: markdown
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            xvfb \
+            x11-utils \
+            libglib2.0-0 \
+            libnss3 \
+            libnspr4 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libcups2 \
+            libdrm2 \
+            libdbus-1-3 \
+            libexpat1 \
+            libxcb1 \
+            libxkbcommon0 \
+            libx11-6 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxext6 \
+            libxfixes3 \
+            libxrandr2 \
+            libgbm1 \
+            libpango-1.0-0 \
+            libcairo2
+          echo "系统依赖安装完成"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,21 +57,35 @@ jobs:
       - name: Install Python dependencies
         timeout-minutes: 8
         run: |
-          echo "开始安装依赖（预计 3–6 分钟）"
-          set -e
-          pip install --quiet playwright aiohttp
-          playwright install chromium --with-deps
+          echo "安装 Python 依赖..."
+          pip install --quiet seleniumbase aiohttp
           echo "依赖安装完成"
 
+      - name: Install gost
+        run: |
+          echo "安装 gost..."
+          wget -q https://github.com/ginuerzh/gost/releases/download/v2.11.5/gost-linux-amd64-2.11.5.gz
+          gunzip gost-linux-amd64-2.11.5.gz
+          mv gost-linux-amd64-2.11.5 gost
+          chmod +x gost
+          sudo mv gost /usr/local/bin/gost
+          gost -V
+          echo "gost 安装完成"
+
       - name: Run login script
-        timeout-minutes: 6
+        timeout-minutes: 8
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           LOGIN_ACCOUNTS: ${{ secrets.LOGIN_ACCOUNTS }}
+          SOCKS5_PROXY: ${{ secrets.SOCKS5_PROXY }}
+          DISPLAY: ':99'
         run: |
-          echo "开始执行 login.py（最多 5 分钟）"
-          timeout 5m python login.py && echo "login.py 成功完成" || echo "脚本执行失败或被超时中断"
+          echo "启动 Xvfb 虚拟显示器..."
+          Xvfb :99 -screen 0 1920x1080x24 &
+          sleep 2
+          echo "开始执行 login.py（最多 7 分钟）"
+          timeout 7m python login.py && echo "login.py 成功完成" || echo "脚本执行失败或超时"
           echo "本 step 结束"
 
   notify-failure:
@@ -57,5 +98,5 @@ jobs:
         with:
           to: ${{ secrets.TG_CHAT_ID }}
           token: ${{ secrets.TG_BOT_TOKEN }}
-          message: "*GitHub Actions 异常*\n\n状态：`${{ needs.login.result }}`\n${{ needs.login.result == 'cancelled' && '超时自动取消' || '脚本执行失败' }}\n\n查看日志：\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\n\n发 `/retry` 手动重试"
+          message: "*GitHub Actions 异常*\n状态：`${{ needs.login.result }}`\nhttps://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           format: markdown
