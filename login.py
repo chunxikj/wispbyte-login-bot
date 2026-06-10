@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 
 LOGIN_URL = "https://wispbyte.com/client/servers"
-CONSOLE_URL = "https://wispbyte.com/client/servers/67461084/console"
+CONSOLE_URL = "https://wispbyte.com/client/servers/c11b1764/console"
 GOST_LOCAL_PORT = 18080
 
 TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
